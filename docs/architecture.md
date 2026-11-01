@@ -132,6 +132,62 @@ uvco/
   **等待所有分支以 ECANCELED 结束后**才返回（满足销毁契约）；返回胜出下标与结果。
 - `timeout(loop, ms, task)`：基于 `whenAny(task, sleep)`，超时返回 `UV_ETIMEDOUT`。
 
+实现（`include/uvco/sync/`，聚合头 `uvco/sync.hpp`）：
+
+- 共同规则
+  - Event / Mutex / Channel 只能在所属 loop 线程上使用（契约），不加锁。
+  - 等待者按到达顺序排在 `detail::WaitQueue` 中（侵入式双链表）；节点内嵌在 awaiter 里（awaiter 在
+    co2 的 awaiter 槽中、地址稳定），不挂起的快速路径与不可停止的等待零分配；只有以可停止的
+    token 挂起时才分配一个 `CancelHook`。
+  - **先看取消**：`await_suspend` 时若 stop 已被请求，一律 `UV_ECANCELED`，即使资源立即可用
+    （与 sleep / tick 一致；值不被发送 / 不被取走 / 锁不被获取）。
+  - 挂起中被取消：经 loop 投递，若仍在队列中则出队并以 `UV_ECANCELED` 恢复。
+    **已被唤醒（出队）的等待者结果在唤醒时确定**，之后到达的取消不起作用。
+  - `await_resume` 不再访问原语本身（Mutex 的 Guard 除外，此时调用方已持锁），
+    因此等待者被唤醒后原语即可销毁。带着等待者销毁原语、带着锁销毁 Mutex 是契约违规。
+- `Event{loop, initiallySet=false}`：`set()` 唤醒全部等待者并保持置位；`reset()`；`isSet()`；
+  `wait() -> Result<void>`，已置位立即完成。
+- `Mutex{loop}`：`lock() -> Result<void>`（之后手动 `unlock()`）、`scopedLock() -> Result<Mutex::Guard>`
+  （只可移动，析构或 `unlock()` 时解锁）、`tryLock()`、`isLocked()`。
+  `unlock()` 有等待者时把锁**直接移交**给队首（锁保持占用，`tryLock()` 无法插队），严格 FIFO。
+- `Channel<T>{loop, capacity = Channel<T>::unbounded}`：`capacity == 0` 为会合通道。
+  - `send(T) -> Result<void>`：有接收者等待则直接交给队首接收者；否则缓冲未满入缓冲；否则挂起。
+    已关闭 → `UV_EPIPE`。
+  - `recv() -> Result<T>`：先取缓冲（取走后把队首挂起发送者的值补进缓冲并唤醒它）；缓冲为空时
+    直接从队首发送者取值（会合）；都没有且已关闭 → `UV_EOF`；否则挂起。
+  - `close()`：幂等；挂起的接收者以 `UV_EOF`、挂起的发送者以 `UV_EPIPE` 唤醒（其值被丢弃）；
+    已缓冲的值仍可取完，之后才是 `UV_EOF`。
+  - `trySend(v)` / `tryRecv()`：不挂起；满 / 空时 `UV_EAGAIN`（trySend 失败不移动实参），
+    关闭后分别为 `UV_EPIPE` / `UV_EOF`。另有 `size()`、`capacity()`、`isClosed()`。
+- `whenAny(Task<T>...)` / `whenAny(std::vector<Task<T>>) -> WhenAnyResult<T>{index, value}`
+  （`T = void` 时只有 `index`）。
+  - 与 `co2::whenAll` 同构：awaiter 即操作状态，每分支一个手写续体帧，计数 N+1。内部 `stop_source`
+    经 `stop_callback` 链到父 token。
+  - 第一个完成（包括以异常结束）的分支 CAS 成为胜出者并 `request_stop()`；**等所有分支结束**后
+    恢复等待者。全部分支按顺序启动（启动途中已胜出时，之后的分支看到 stop 已请求）。
+  - 胜出者的异常在 `await_resume` 中重抛；落败者的结果与异常被丢弃。
+  - 分支可以在别的线程上完成；等待者在最后完成的分支所在线程恢复（同 whenAll）。
+  - 分支须同类型（`static_assert`）；空 vector 是契约违规。
+- `timeout(loop, ms, Task<Result<T>>) -> Result<T>`：`whenAny(task, 计时分支)`。task 胜出 → 它的结果
+  （含它自己的错误 / 异常）；计时分支胜出 → `UV_ETIMEDOUT`；父 token 取消 → 两边都结束，
+  计时分支先完成时为 `UV_ECANCELED`。task 忽略取消时，超时后仍要等它结束。返回 awaitable
+  （不是 Task）；计时分支是一个帧内放 `Sleep` 的小 Task。
+
+#### 恢复策略（sync 与 timer 统一）
+
+“谁的栈上运行被唤醒的协程”按唤醒来源决定：
+
+- **就地恢复**：唤醒来自 libuv / loop 回调，栈上没有用户协程帧——I/O 与请求完成、定时器到期、
+  经 `uv_async` 投递的取消节点（`CancelHook`）。这样少一次排队，且不会重入用户代码。
+- **经 `loop.schedule()` 延后恢复**：唤醒来自用户代码——`Event::set`、`Mutex::unlock`、
+  `Channel::send/recv/close`、`Timer::stop`、句柄 `close()` 中止挂起操作。唤醒方继续执行到
+  它自己的挂起点，不会在 `set()` / `unlock()` 的栈上运行任意多个等待者（避免深递归、
+  迭代中修改队列、以及“唤醒者以为还持有的状态已被等待者改掉”）。延后恢复的顺序就是唤醒顺序
+  （本地队列 FIFO）。
+- **组合子**（whenAll / whenAny / timeout）走 Task 续体（对称转移），不额外排队。
+
+timer 已经遵循这一规则（§8 原待定问题据此关闭）。
+
 ### 4.6 stream
 
 - `Stream` 基类（`Tcp`、`Pipe`，后续 `Tty`）：
@@ -199,8 +255,13 @@ uvco/
   co2 稳定前需要跟进其变化，或请 co2 提供公开的“启动 Task”扩展点。
 - `TickAwaiter` 只持有控制块指针，应立即 `CO2_AWAIT(t.tick())`；若先取出 awaiter、跨过 `close()`
   再等待则悬垂（目前无检查）。
-- 定时器回调路径（到期 / stop_token 取消）内联恢复 tick 等待者；stop()/close() 路径延后恢复。
-  若后续 sync 原语需要统一“永不内联恢复”，再评估。
+- ~~定时器回调路径内联恢复、stop()/close() 延后恢复是否要统一~~：已在 §4.5“恢复策略”中统一
+  （按唤醒来源区分，timer 现有行为即符合）。
+- sync / whenAny 额外依赖 co2 `detail`：`ForwardStop`、`LateInit`、`HandleAccess::header`、
+  `TaskAccess::arm/hasError/rethrowError/takeResult`（与 co2::whenAll 的实现方式相同）。
+- `timeout` 只接受 `Task<Result<T>>`；普通 `Task<T>` 需调用方自行包装（是否提供适配重载待定）。
+- whenAny 只支持同类型分支；异构分支需要 C++17 `variant` 或用户包装，暂不提供。
+- sync 原语不支持跨线程使用；跨线程通信目前只能经 `scheduleOn(loop)` 回到 loop 线程再操作。
 - 计时测试有毫秒级容差（如 20ms sleep 断言 ≥19ms，libuv 时钟为毫秒截断）。
 - 尚未提供 install / export 规则（目前只支持 `add_subdirectory` / FetchContent 方式使用）。
 
@@ -221,3 +282,15 @@ uvco/
 - §4.4 时长用 `std::chrono::milliseconds`；`tick()` 返回到期次数（`Result<uint64_t>`）而非 `Result<void>`；
   stop_token 取消 tick 不停止定时器；启动前 `uv_update_time`。
 - `sleep()` 基于 `ReqAwaiter`（内嵌 `uv_timer_t`，恢复前关闭），而非借用 `Timer`。
+
+### 实现 sync 时记录
+
+- §4.5 whenAny 只支持同类型分支（`WhenAnyResult<T>{index, value}`），原写“`whenAny(a, b, ...)`”未限定类型。
+- §4.5 whenAny 的“完成”包括异常：抛异常的分支也能胜出，其异常被重抛；落败者的异常被丢弃。
+  落败者不必以 ECANCELED 结束——只要求结束（结果被丢弃）。
+- `Channel::send` 在关闭后返回 `UV_EPIPE`（原设计只规定了 recv 的 `UV_EOF`）；`capacity == 0` 为会合通道；
+  增加 `trySend` / `tryRecv`（`UV_EAGAIN`）。
+- 统一“先看取消”规则：已请求停止时 wait / lock / send / recv 一律 `UV_ECANCELED`，即使可以立即完成。
+- 等待节点内嵌在 awaiter 中，`CancelHook` 仅在以可停止 token 挂起时分配。
+- Mutex 解锁时直接移交（不可插队），并提供 `scopedLock()` 返回 `Guard`。
+- `timeout` 只接受 `Task<Result<T>>`，返回 awaitable 而非 Task。
