@@ -1,0 +1,31 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "debug-gcc",
+      "binaryDir": "${sourceDir}/build/debug-gcc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_COMPILER": "g++",
+        "CMAKE_C_COMPILER": "gcc"
+      }
+    },
+    {
+      "name": "debug-clang",
+      "binaryDir": "${sourceDir}/build/debug-clang",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_C_COMPILER": "clang"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "debug-gcc", "configurePreset": "debug-gcc" },
+    { "name": "debug-clang", "configurePreset": "debug-clang" }
+  ],
+  "testPresets": [
+    { "name": "debug-gcc", "configurePreset": "debug-gcc", "output": { "outputOnFailure": true } },
+    { "name": "debug-clang", "configurePreset": "debug-clang", "output": { "outputOnFailure": true } }
+  ]
+}
