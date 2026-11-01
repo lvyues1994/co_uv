@@ -77,6 +77,17 @@ uvco/
 - 提供 `CO2_AWAIT(h.close())` 显式等待关闭完成。
 - 句柄只可移动，不可复制。
 - 句柄上有挂起中的操作时析构 → 契约违规（与 co2 Task 一致）。
+- 实现（`core/handle.hpp`，Timer / Stream / Udp 共用）：
+  - `detail::HandleBlock`：堆上控制块（虚析构），`uv_handle_t::data` 一律存 `HandleBlock*`。
+    派生类提供 `uvHandle()` 与 `abortPending()`；挂起操作用 `opBegin()/opEnd()` 计数。
+    控制块在“close 回调已执行 **且** 没有在途操作”时才释放，因此被中止的操作恢复时控制块仍有效。
+  - `detail::Handle<Block>`：只可移动的所有者基类。析构 = 若有挂起操作则契约违规，否则 `uv_close`。
+  - `close()` 返回 `CloseAwaiter`（`[[nodiscard]]`），并**立即置空**所有者（之后 `isOpen()==false`，
+    析构不再触碰控制块）。等待它直到 close 回调执行；未被等待的 `CloseAwaiter` 在析构时仍会发起关闭。
+    对空句柄 `close()` 为空操作。
+  - 扩展：`close()` 时若有挂起操作，以 `UV_ECANCELED` 中止它们（经 `loop.schedule` 延后恢复），
+    而不是契约违规——显式 close 是合法的“取消一切”手段；只有直接析构才算违规。
+  - 句柄可以在 Loop 析构之前一刻销毁：`~Loop` 会跑一次 `uv_run(NOWAIT)` 处理待关闭句柄。
 
 ### 4.3 取消
 
@@ -91,12 +102,26 @@ uvco/
   线程也延后执行，避免在 `request_stop()` 调用栈里重入 libuv）；节点在 loop 线程上若请求仍
   在途则调用 `Derived::cancel()`。`await_resume` 先析构 `stop_callback`（会等待其他线程上
   正在执行的回调结束），再撤销尚未执行的节点。
+- 该机制抽成 `detail::CancelHook`（`core/cancel.hpp`）：`arm(loop, token, fn, ctx)` /
+  `disarm()`，`ReqAwaiter` 与句柄控制块（如 `TimerBlock`）共用。句柄操作把 CancelHook 放在控制块里，
+  使 awaiter 只有一个指针大小、无分配。
 
 ### 4.4 timer
 
 - `sleep(loop, ms) -> Result<void>`：一次性定时器。
 - `Timer`：可重复，`CO2_AWAIT(timer.tick())`。
 - 是 `timeout` 的基础。
+- 实现（`include/uvco/timer/`）：
+  - 时长统一用 `std::chrono::milliseconds`（负值契约违规）。启动前调用 `uv_update_time`，
+    计时从调用时刻起算，而非从本次迭代开始时缓存的 `uv_now` 起算（否则首个 sleep 可能提前结束）。
+  - `sleep()` 返回 `Sleep`，基于 `ReqAwaiter`，内嵌 `uv_timer_t`；到期或取消后先 `uv_close`，
+    在 close 回调里恢复（因此每次 sleep 多一次迭代）。`CO2_AWAIT(sleep(loop, d))`（右值）有一次堆分配；
+    帧局部 `Sleep s{loop, d}; CO2_AWAIT(s);` 零分配且可复用（`setDuration`）。
+  - `Timer t{loop}; t.start(timeout, repeat)`；`stop()`、`setRepeat()/repeat()`、`dueIn()`、`isActive()`。
+  - `tick() -> Result<std::uint64_t>`：返回自上次 tick 以来的到期次数（无人等待时累计，类似 timerfd）；
+    已有累计则立即返回。未启动 / 一次性已耗尽 → `UV_EINVAL`。同一时刻只允许一个等待者（契约）。
+  - stop_token 取消 tick → `UV_ECANCELED`，**定时器继续运行**；`stop()` / `close()` 使挂起的 tick
+    以 `UV_ECANCELED` 结束。
 
 ### 4.5 sync（loop 内单线程原语）
 
@@ -172,6 +197,11 @@ uvco/
 - uvco core 依赖 co2 的若干 `detail` 接口：`TaskAccess`（启动 Task / 取结果）、`stopTokenOf`
   （从 promise 取 stop_token）、`FrameHeader` / `noopDestroy`（run() 的手写完成帧）。
   co2 稳定前需要跟进其变化，或请 co2 提供公开的“启动 Task”扩展点。
+- `TickAwaiter` 只持有控制块指针，应立即 `CO2_AWAIT(t.tick())`；若先取出 awaiter、跨过 `close()`
+  再等待则悬垂（目前无检查）。
+- 定时器回调路径（到期 / stop_token 取消）内联恢复 tick 等待者；stop()/close() 路径延后恢复。
+  若后续 sync 原语需要统一“永不内联恢复”，再评估。
+- 计时测试有毫秒级容差（如 20ms sleep 断言 ≥19ms，libuv 时钟为毫秒截断）。
 - 尚未提供 install / export 规则（目前只支持 `add_subdirectory` / FetchContent 方式使用）。
 
 ## 9. 与原设计的偏差（实现 core 时记录）
@@ -183,3 +213,11 @@ uvco/
 - §4.1 `ReqAwaiter` 模板参数改为 `<Derived, Req, T>`（CRTP），以便每种请求自定义发起、完成与取消。
 - Loop 额外绑定构造线程并限制每线程一个，以便 `isLoopThread()` 检查与 `Loop::current()`。
 
+
+### 实现 timer 时记录
+
+- §4.2 扩展：`close()` 中止挂起操作（`UV_ECANCELED`）；`close()` 后所有者立即为空；未等待的 close 仍关闭。
+- §4.3 取消机制抽成 `detail::CancelHook`，供请求与句柄共用。
+- §4.4 时长用 `std::chrono::milliseconds`；`tick()` 返回到期次数（`Result<uint64_t>`）而非 `Result<void>`；
+  stop_token 取消 tick 不停止定时器；启动前 `uv_update_time`。
+- `sleep()` 基于 `ReqAwaiter`（内嵌 `uv_timer_t`，恢复前关闭），而非借用 `Timer`。

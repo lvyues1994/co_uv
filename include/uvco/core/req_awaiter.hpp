@@ -1,6 +1,5 @@
 #pragma once
 
-#include <new>
 #include <type_traits>
 #include <utility>
 
@@ -9,6 +8,7 @@
 #include <co2/stop_token.hpp>
 #include <uv.h>
 
+#include "uvco/core/cancel.hpp"
 #include "uvco/core/config.hpp"
 #include "uvco/core/loop.hpp"
 #include "uvco/core/result.hpp"
@@ -31,12 +31,12 @@
 //
 // 取消（§4.3）：
 //   - await_suspend 时若 stop 已经被请求，不发起请求，直接以 UV_ECANCELED 完成；
-//   - 否则发起请求后注册 stop_callback。回调可能在任意线程触发，它只把一个侵入式
-//     LoopCallback 节点 post 到 loop；节点在 loop 线程上执行 Derived::cancel()；
+//   - 否则发起请求后经 detail::CancelHook 注册 stop_callback：回调可能在任意线程
+//     触发，只投递到 loop；在 loop 线程上若请求仍在途则执行 Derived::cancel()；
 //   - 被取消的请求照常经由 libuv 回调“正常完成”（通常是 UV_ECANCELED），协程随后
 //     走到终点——满足 co2 的销毁契约。uv_cancel 失败（请求已在执行）则等它自然完成；
-//   - await_resume 先注销 stop_callback（若回调正在别的线程执行则等它返回），再
-//     unpost 尚未执行的取消节点，之后 awaiter 才可以被销毁。
+//   - await_resume 先 disarm（注销 stop_callback 并撤销未执行的投递），之后 awaiter
+//     才可以被销毁。
 //
 // 两种用法：
 //   1. 右值：CO2_AWAIT_SET(r, FsStat{loop, path});  awaiter 被移进 co2 的 awaiter 槽，
@@ -115,7 +115,7 @@ template <class Derived, class Req, class T> class ReqAwaiter {
 
     Result<T> await_resume() {
         UVCO_CONTRACT_CHECK(state_ == State::done);
-        releaseStop();
+        cancelHook_.disarm();
         state_ = State::idle;
         waiter_ = nullptr;
         return derived().finish(status_);
@@ -150,47 +150,22 @@ template <class Derived, class Req, class T> class ReqAwaiter {
   private:
     enum class State : unsigned char { idle, pending, done };
 
-    struct StopFn {
-        ReqAwaiter* self;
-        // 任意线程：只投递，不碰 libuv。
-        void operator()() const noexcept { self->loop_->post(&self->cancelNode_); }
-    };
-    using StopCallback = co2::stop_callback<StopFn>;
-
-    struct CancelNode : LoopCallback {
-        ReqAwaiter* self = nullptr;
-    };
-
-    static void runCancel(LoopCallback* const node) noexcept {
-        auto* const self = static_cast<CancelNode*>(node)->self;
+    static void runCancel(void* const context) {
+        auto* const self = static_cast<ReqAwaiter*>(context);
         if (self->state_ == State::pending) self->derived().cancel();
     }
 
     void registerStop(co2::stop_token token, std::true_type) {
-        if (not token.stop_possible()) return;
-        cancelNode_.invoke = &ReqAwaiter::runCancel;
-        cancelNode_.self = this;
-        // 若此刻已被请求，构造函数里同步执行回调（仍然只是 post）。
-        ::new (static_cast<void*>(&stopStorage_)) StopCallback{std::move(token), StopFn{this}};
-        hasStop_ = true;
+        cancelHook_.arm(*loop_, std::move(token), &ReqAwaiter::runCancel, this);
     }
 
     void registerStop(co2::stop_token, std::false_type) noexcept {}
-
-    void releaseStop() noexcept {
-        if (not hasStop_) return;
-        reinterpret_cast<StopCallback*>(&stopStorage_)->~StopCallback();
-        hasStop_ = false;
-        loop_->unpost(&cancelNode_);
-    }
 
     Loop* loop_;
     co2::coroutine_handle<> waiter_;
     int status_ = 0;
     State state_ = State::idle;
-    bool hasStop_ = false;
-    CancelNode cancelNode_;
-    typename std::aligned_storage<sizeof(StopCallback), alignof(StopCallback)>::type stopStorage_;
+    CancelHook cancelHook_;
 };
 
 } // namespace detail
