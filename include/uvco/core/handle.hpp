@@ -26,6 +26,9 @@
 // 关闭只发起 uv_close，真正释放发生在之后的 loop 迭代里；Loop 析构时会再跑一次
 // UV_RUN_NOWAIT，因此“析构句柄后紧接着析构 Loop”也是合法的。
 //
+// 控制块也可以在用户句柄仍持有它时被内部关闭（closeInternally()，例如取消 connect）：
+// 此后操作立即失败，句柄的 close()/析构只是放弃控制块（必要时等到 close 回调）。
+//
 // 派生控制块需要：uv_xxx_init 之后调用 bindHandle()，并实现
 //   uv_handle_t* uvHandle() noexcept override;
 //   void abortPending() noexcept override;   // 关闭时：以 UV_ECANCELED 结束挂起的操作
@@ -43,12 +46,28 @@ class HandleBlock {
     bool closing() const noexcept { return closing_; }
     bool hasPendingOps() const noexcept { return outstanding_ != 0; }
 
-    // loop 线程：发起关闭；closeWaiter 可为空。只能调用一次。
-    void beginClose(co2::coroutine_handle<> const closeWaiter) noexcept {
+    // loop 线程：用户句柄放弃控制块（close() 或析构）。尚未关闭则发起关闭。
+    // 返回 true 表示 closeWaiter 会在 close 回调里恢复；false 表示已经关闭完毕
+    // （例如控制块此前已被内部关闭），调用者不必挂起。closeWaiter 可为空。只能调用一次。
+    bool release(co2::coroutine_handle<> const closeWaiter) noexcept {
         UVCO_CONTRACT_CHECK(loop_->isLoopThread());
-        UVCO_CONTRACT_CHECK(not closing_);
-        closing_ = true;
+        UVCO_CONTRACT_CHECK(owned_);
+        owned_ = false;
+        if (closed_) {
+            destroyIfDone();
+            return false;
+        }
         closeWaiter_ = closeWaiter;
+        closeInternally();
+        return static_cast<bool>(closeWaiter);
+    }
+
+    // loop 线程：在用户句柄仍持有控制块时发起关闭（例如取消 connect：libuv 无法取消
+    // 连接请求，只能关闭 socket）。之后句柄上的操作立即失败；重复调用无效果。
+    void closeInternally() noexcept {
+        UVCO_CONTRACT_CHECK(loop_->isLoopThread());
+        if (closing_) return;
+        closing_ = true;
         uv_close(uvHandle(), &HandleBlock::onClose);
         abortPending();
     }
@@ -92,12 +111,13 @@ class HandleBlock {
     }
 
     void destroyIfDone() noexcept {
-        if (closed_ && outstanding_ == 0) delete this;
+        if (closed_ && outstanding_ == 0 && not owned_) delete this;
     }
 
     Loop* loop_;
     co2::coroutine_handle<> closeWaiter_;
     unsigned outstanding_ = 0;
+    bool owned_ = true; // 用户句柄（Handle<Block>）仍持有控制块
     bool closing_ = false;
     bool closed_ = false;
 };
@@ -112,13 +132,13 @@ class CloseAwaiter {
     CloseAwaiter& operator=(CloseAwaiter&&) = delete;
 
     ~CloseAwaiter() {
-        if (block_ != nullptr) block_->beginClose({}); // 从未被等待：照样关闭
+        if (block_ != nullptr) static_cast<void>(block_->release({})); // 从未被等待：照样关闭
     }
 
     bool await_ready() const noexcept { return block_ == nullptr; }
 
-    template <class Promise> void await_suspend(co2::coroutine_handle<Promise> const waiting) {
-        std::exchange(block_, nullptr)->beginClose(waiting);
+    template <class Promise> bool await_suspend(co2::coroutine_handle<Promise> const waiting) {
+        return std::exchange(block_, nullptr)->release(waiting);
     }
 
     void await_resume() const noexcept {}
@@ -160,6 +180,7 @@ template <class Block> class Handle {
     }
 
   protected:
+    Handle() noexcept : block_{nullptr} {}
     explicit Handle(Block* const block) noexcept : block_{block} {}
 
     // 在 loop 线程上取得控制块；空句柄上操作是契约违规。
@@ -177,7 +198,7 @@ template <class Block> class Handle {
         // §4.2：句柄上有挂起中的操作时析构是契约违规（等待者的帧还引用着它）。
         if (block->hasPendingOps())
             UVCO_CONTRACT_FAIL("uvco handle destroyed while an operation is pending");
-        block->beginClose({});
+        static_cast<void>(block->release({}));
     }
 
     Block* block_;

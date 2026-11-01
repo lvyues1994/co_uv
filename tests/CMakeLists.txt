@@ -15,14 +15,18 @@ function(uvco_configure_test target)
 endfunction()
 
 foreach(name IN ITEMS result_tests loop_tests thread_tests req_awaiter_tests timer_tests
-                      sync_tests
+                      sync_tests stream_tests
                       run_wrong_thread_contract_test timer_pending_destroy_contract_test
-                      sync_event_destroy_contract_test)
+                      sync_event_destroy_contract_test stream_concurrent_read_contract_test)
     string(REPLACE "_" "-" target "uvco-${name}")
     add_executable(${target} ${name}.cpp)
     uvco_configure_test(${target})
     add_test(NAME ${target} COMMAND ${target})
 endforeach()
+
+# Pipe 测试的套接字文件放在构建目录里。
+target_compile_definitions(uvco-stream-tests PRIVATE
+    UVCO_TEST_PIPE_DIR="${CMAKE_CURRENT_BINARY_DIR}")
 
 target_compile_definitions(uvco-req-awaiter-tests PRIVATE
     UVCO_TEST_SOURCE_FILE="${CMAKE_CURRENT_SOURCE_DIR}/req_awaiter_tests.cpp")

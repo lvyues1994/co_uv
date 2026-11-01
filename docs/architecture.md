@@ -88,6 +88,10 @@ uvco/
   - 扩展：`close()` 时若有挂起操作，以 `UV_ECANCELED` 中止它们（经 `loop.schedule` 延后恢复），
     而不是契约违规——显式 close 是合法的“取消一切”手段；只有直接析构才算违规。
   - 句柄可以在 Loop 析构之前一刻销毁：`~Loop` 会跑一次 `uv_run(NOWAIT)` 处理待关闭句柄。
+  - 所有权与关闭分离（stream 引入）：`HandleBlock::release(closeWaiter)` 由所有者调用恰好一次
+    （close / 析构 / CloseAwaiter），`closeInternally()` 可由库内部提前发起关闭（如取消 connect），
+    此时所有者仍持有控制块（`isOpen()==true`），后续操作返回 `UV_EBADF`，`close()` 仍可等待。
+    控制块释放条件为“close 回调已执行 且 无在途操作 且 所有者已释放”。
 
 ### 4.3 取消
 
@@ -190,15 +194,45 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
 
 ### 4.6 stream
 
-- `Stream` 基类（`Tcp`、`Pipe`，后续 `Tty`）：
-  - `read(buf) -> Result<size_t>`：拉模式。libuv 是推模式（`uv_read_start`），
-    仅在有等待者时 start，无等待者时 `uv_read_stop` 形成背压；多余数据进入小缓冲。
-    EOF 返回 `UV_EOF`。
-  - `write(bufs) -> Result<void>`、`shutdown()`、`close()`。
-  - 可选：`chunks() -> co2::AsyncGenerator<Chunk>`。
-- `Tcp::connect(addr)`、`Tcp::bind`、`listen(backlog)` + `accept() -> Result<Tcp>`。
-- `Pipe::connect(path)`、`Pipe::bind(path)`。
-- v0.1 不含 DNS：`connect` 只接受 IP 地址（`sockaddr` / `ip4_addr` / `ip6_addr`）。
+头文件：`uvco/stream.hpp`（`stream/buffer.hpp`、`address.hpp`、`stream.hpp`、`tcp.hpp`、`pipe.hpp`）。
+
+- 缓冲区：`MutableBuffer{char*, size}` / `ConstBuffer{char const*, size}`，`buffer(...)` 适配指针+长度、
+  `std::string`、`std::vector<char>`、`char[N]`。**缓冲区由调用方持有，必须活到 await 结束**；
+  右值 string / vector 的重载被删除以避免悬垂。
+- `SocketAddress`：`ipv4(ip, port)` / `ipv6` / `parse(ip, port)`（含 `:` 视为 IPv6）→ `Result<SocketAddress>`，
+  `fromRaw(sockaddr const*)`、`family()`、`port()`、`ip()`、`toString()`（`ip:port` / `[ip]:port`）。不做 DNS。
+- 公共流接口 `detail::StreamHandle<Block, Self>`（`Tcp`、`Pipe` 共用，后续 `Tty`）：
+  - `read(MutableBuffer) -> Result<size_t>`：拉模式。仅在有读者挂起时 `uv_read_start`，每次回调后
+    立即 `uv_read_stop`，无读者时数据留在内核缓冲区形成背压。`alloc_cb` 直接交出读者的缓冲区（零拷贝），
+    因此**没有溢出缓冲**；无读者时给出 0 长度缓冲 → `UV_ENOBUFS` → 停止读取（防御性）。
+    EOF 返回 `UV_EOF`；EOF 与读错误是**粘性**的，之后的 read 立即返回同一错误。
+    同一流上并发两个 read → 契约违规。空缓冲区 → 契约违规。
+  - `write(ConstBuffer)` / `write(std::vector<ConstBuffer>) -> Result<void>`：先 `uv_try_write` 快速路径，
+    未写完的部分（裁剪后）交给 `uv_write`（请求对象按需堆分配）。完成 = 全部数据交给内核。
+    并发写按调用顺序排队（libuv 写队列保证顺序；队列非空时 `uv_try_write` 返回 EAGAIN）。
+    空缓冲区被跳过；全部为空时立即成功。
+  - `shutdown() -> Result<void>`：等待已排队写完成后关闭写端（半关闭，仍可读）。
+  - `listen(backlog = 128) -> Result<void>`、`accept() -> Result<Self>`：拉模式 accept。
+    `connection_cb` 只在有 accept 等待者时取连接；无等待者时 libuv 自身保留一个已接受 fd 并停止监听读事件，
+    其余连接留在内核 backlog（背压）。未 listen 时 accept → `UV_EINVAL`；并发两个 accept → 契约违规。
+  - `writeQueueSize()`、`isReadable()`、`isWritable()`、`close()`、`isOpen()`。
+- `Tcp`：`Tcp()`（空句柄，可作协程帧局部变量、接收 accept 结果）、`explicit Tcp(Loop&)`、
+  `bind(SocketAddress, flags = 0)`、`connect(SocketAddress)`、`setNoDelay(bool)`、
+  `setKeepAlive(bool, seconds delay = 60s)`、`localAddress()` / `peerAddress() -> Result<SocketAddress>`、`raw()`。
+- `Pipe`：`Pipe()`、`explicit Pipe(Loop&)`、`bind(path)`、`connect(path)`、
+  `localName()` / `peerName() -> Result<std::string>`、`raw()`。不支持 IPC（传递句柄）。
+- 取消（stop_token，统一“先看取消”规则：已请求停止 → `UV_ECANCELED`，不发起操作）：
+  - read：`uv_read_stop` 并以 `UV_ECANCELED` 完成；流保持可用，未读数据不丢失。
+  - accept：以 `UV_ECANCELED` 完成；监听继续，之后可再 accept。
+  - connect：libuv 无法取消进行中的 connect，因此**取消 = 关闭流**（`closeInternally()`），connect 以
+    `UV_ECANCELED` 完成；之后该流上的操作返回 `UV_EBADF`，仍需（也可以）`close()` / 析构。
+  - write / shutdown：发起后不可取消（只在发起前检查停止）；`timeout(write)` 不能截断已排队的写，
+    要中止只能 `close()`。
+  - `close()` 中止所有挂起的 read / write / accept / connect，均以 `UV_ECANCELED` 结束（延后恢复）。
+    被中止或失败的写不报告已写字节数。
+- 在已（内部）关闭的流上 read / write / accept / connect / shutdown → `UV_EBADF`。
+- 恢复策略同 §4.5：libuv 回调与取消节点中内联恢复；close 中止延后恢复。
+- 未实现：`chunks() -> co2::AsyncGenerator<Chunk>`（可在 read 之上由用户构造，暂不提供）。
 
 ### 4.7 udp
 
@@ -263,6 +297,11 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
 - whenAny 只支持同类型分支；异构分支需要 C++17 `variant` 或用户包装，暂不提供。
 - sync 原语不支持跨线程使用；跨线程通信目前只能经 `scheduleOn(loop)` 回到 loop 线程再操作。
 - 计时测试有毫秒级容差（如 20ms sleep 断言 ≥19ms，libuv 时钟为毫秒截断）。
+- stream：无 `Tty`；Pipe 不支持 IPC（传递句柄）与 Linux 抽象套接字（`uv_pipe_bind2` 需 libuv ≥1.46，
+  而最低版本为 1.40）；不能在不关闭流的情况下取消写；connect 取消会关闭流；Windows 行为未测试
+  （命名管道、`uv_try_write` 语义不同）。
+- stream 依赖 libuv 的若干实现行为（已在 1.48 源码核对）：无 accept 时保留一个已接受 fd 并停止监听、
+  `READING` 标志清除后读循环立即停止、关闭时以 `UV_ECANCELED` 回调 connect / write。
 - 尚未提供 install / export 规则（目前只支持 `add_subdirectory` / FetchContent 方式使用）。
 
 ## 9. 与原设计的偏差（实现 core 时记录）
@@ -294,3 +333,16 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
 - 等待节点内嵌在 awaiter 中，`CancelHook` 仅在以可停止 token 挂起时分配。
 - Mutex 解锁时直接移交（不可插队），并提供 `scopedLock()` 返回 `Guard`。
 - `timeout` 只接受 `Task<Result<T>>`，返回 awaitable 而非 Task。
+
+### 实现 stream 时记录
+
+- §4.6 原写“多余数据进入小缓冲”：改为**无溢出缓冲**。每次读回调后立即 `uv_read_stop`，`alloc_cb` 只在有读者
+  时被调用并直接交出读者缓冲区（零拷贝）；无读者时给 0 长度缓冲，数据留在内核。
+- EOF / 读错误粘性；并发 read、并发 accept 为契约违规（原设计未规定）。
+- accept 为拉模式，背压依赖 libuv 的“保留一个已接受 fd”行为；预先创建的对端控制块在失败时复用。
+- connect 无法真正取消：取消即关闭流（§4.2 增加 `release()` / `closeInternally()` / 所有者标志）。
+- write / shutdown 发起后不可取消；`close()` 以 `UV_ECANCELED` 中止它们。
+- `Tcp` / `Pipe` 提供空的默认构造（便于作协程帧局部变量与接收 accept 结果）。
+- `connect` 接受 `SocketAddress`（而非原写的 `sockaddr` / `ip4_addr` / `ip6_addr` 三种形式）。
+- 新增错误码 `Errc::bad_descriptor`（`UV_EBADF`）、`Errc::not_connected`（`UV_ENOTCONN`）。
+- `chunks()` 生成器未实现。

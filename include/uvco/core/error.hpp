@@ -27,6 +27,8 @@ enum class Errc : int {
     address_in_use = UV_EADDRINUSE,
     not_supported = UV_ENOTSUP,
     no_memory = UV_ENOMEM,
+    bad_descriptor = UV_EBADF, // 在已关闭（或因取消 connect 而内部关闭）的流上操作
+    not_connected = UV_ENOTCONN,
 };
 
 inline int toInt(Errc const errc) noexcept { return static_cast<int>(errc); }
