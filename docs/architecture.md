@@ -307,12 +307,41 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
 
 ### 4.8 fs
 
-- `File::open/read/write/close`、`stat`、`unlink`、`mkdir`、`rename` 等常用操作。
-- 基于 `ReqAwaiter<uv_fs_t>`，回调后 `uv_fs_req_cleanup`。
-- 取消通过 `uv_cancel`（仅对尚未开始执行的请求有效）。
-- 注意：Linux 上 libuv（≥1.45）可能把部分 fs 请求交给 io_uring 执行，此时 `uv_cancel` 返回
-  `EBUSY`，请求会自然完成。取消对 fs 只是“尽力而为”；需要确定性测试时设置
-  `UV_USE_IO_URING=0`（tests/req_awaiter_tests.cpp 即如此）。
+头文件 `uvco/fs.hpp`，命名空间 `uvco::fs`。全部基于 `detail::ReqAwaiter<…, uv_fs_t, …>`。
+
+- **通用 awaiter**：每个操作是 `fs::XxxOp = fs::FsOp<detail::XxxSpec>`。Spec 按值保存参数
+  （路径为 `std::string`，因为 Task 是惰性的、`CO2_AWAIT` 语句里的临时对象在挂起前就已销毁），
+  提供 `submit()`（发起 `uv_fs_xxx`）、`project()`（把成功的请求转换为值）与可选的 `release()`。
+  新增一个操作只需要一个十来行的 Spec 加一行别名 / 便捷函数（借鉴 kotatsu 的 `fs_call`）。
+- **uv_fs_req_cleanup 总会执行**：libuv 回调里先 `project()`，再 `uv_fs_req_cleanup`，最后恢复等待者；
+  发起失败时也立即清理。
+- **两种等待方式**（§7）：
+  - 帧局部：`fs::StatOp op{loop, path};` 写在 `CO2_BEG` 局部列表里，`CO2_AWAIT_SET(r, op);`——
+    零分配，可重复等待，两次等待之间经 `op.args()` 修改参数（在途时调用是契约违规）；
+  - 右值：`CO2_AWAIT_SET(r, fs::stat(loop, path));`——`uv_fs_t` 超出 co2 内联槽，一次堆分配。
+- **File**：只可移动的 fd 所有者。`fs::open(loop, path, flags, mode = 0644)` 返回 `Result<File>`；
+  `read(buf, offset = -1)` / `write(buf, offset = -1)`（-1 为当前位置）返回字节数，
+  `sync()`、`truncate(size)`、`stat()`、`close()`（File 立即变空，awaiter 持有 fd），
+  `release()` 交出 fd，`reset()` 同步关闭。**析构时若仍打开则同步关闭**（`uv_fs_close` 无回调，
+  阻塞调用线程一次 `close(2)`；不依赖 Loop 仍然存活）。File 的操作按值捕获 fd：在操作在途时
+  关闭 / 析构 / 移走 File 是调用者的错误（与对同一 fd 调用 `close(2)` 一样，fd 可能被重用）。
+- **自由函数**：`stat`、`lstat`、`unlink`、`mkdir(mode = 0777)`、`rmdir`、`rename`、
+  `copyfile(flags = 0)`、`mkdtemp`（返回路径）、`mkstemp`（返回 `TempFile{File, path}`）、
+  `readlink`、`realpath`、`scandir`（返回 `std::vector<DirEntry>`，不含 `.`/`..`）、
+  `sendfile(out, in, inOffset, length)`；便捷协程 `readFile(loop, path)` → `Result<std::string>`、
+  `writeFile(loop, path, data, flags = WRONLY|CREAT|TRUNC, mode = 0644)` → `Result<void>`，
+  内部用帧局部 awaiter，除 Task 帧与数据外零分配。
+- **取消**：通过 `uv_cancel`，尽力而为——只能撤下还没被线程池取走的请求。Linux 上 libuv（≥1.45）
+  可能把部分 fs 请求（open、close、read、write、fsync、stat……）交给 io_uring，此时 `uv_cancel` 返回
+  `EBUSY`，请求自然完成。
+- **迟到的取消**（借鉴 kotatsu 的 Release 钩子）：取消已请求、但请求仍然成功完成时，
+  产生资源的操作在回调里同步释放资源并报告 `Errc::canceled`——`open` 关闭 fd，`mkstemp` 关闭 fd
+  并删除文件，`mkdtemp` 删除目录。不产生资源的操作照常报告真实结果（副作用已经发生，例如
+  unlink；read 读到的数据也照常返回）。
+- **Loop 析构**：fs 请求不是句柄，`~Loop` 的 `UV_RUN_ONCE` 循环会把在途请求驱动到完成，
+  等待者照常拿到结果——没有 `Errc::aborted` 路径（被阻塞的请求，例如打开没有写端的 FIFO，
+  会让 `~Loop` 一直等下去）。
+- 测试在 io_uring 开 / 关两种模式下各跑一遍（ctest 的 `UV_USE_IO_URING=1` / `=0`）。
 
 ## 5. v0.1 范围（已定）
 
@@ -455,3 +484,22 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
 - 明确了“没有等待者时的数据报”：不排队，留在内核里（kotatsu 排 64 个）。
 - 为推迟任务在 `HandleBlock` 增加 `holdBegin()` / `holdEnd()`：保活控制块但不计入
   `hasPendingOps()`，因此句柄在推迟的停止排队时仍可正常析构。
+
+### 实现 fs（第 6 步）时记录
+
+参照 kotatsu（clice-io/kotatsu `src/async/io/fs.cpp`）：
+
+- §4.8 原文只列了 `File::open/read/write/close`：`open` 改为自由函数 `fs::open` 返回 `Result<File>`
+  （与 `mkstemp` 一致）；增加 `File::sync/truncate/stat/release/reset` 与上文的自由函数；
+  选择 `scandir`（一次返回全部条目）而非 `opendir/readdir`。
+- C++14 没有 `auto` 模板参数，kotatsu 的 `fs_call<Project, Release>` 改写为 Spec 结构体 +
+  `FsOp<Spec>`；有 `release` 成员即视为产生资源。
+- 迟到的取消只对产生资源的操作报告 `Errc::canceled`；kotatsu 对所有操作都报告取消。
+  这里保留真实结果，因为副作用（unlink、write……）已经发生，报告取消会误导调用者。
+- 为 `FsOp::args()` 在 `ReqAwaiter` 增加受保护的 `inFlight()`。
+- File 析构选择同步关闭（而非借助 Loop 的即发即忘）：不需要堆上的请求体，Loop 先析构也没有问题。
+- File 的操作不跟踪在途计数（按值捕获 fd），“在途时关闭”只写进文档，不做契约检查。
+- 测试：io_uring 下 `openat` 打开 FIFO 不阻塞（内核先以非阻塞方式打开），因此迟到取消的
+  确定性用例只在 `UV_USE_IO_URING=0` 那一遍走到 release 路径；io_uring 那一遍只检查不泄漏，
+  另用“阻塞在空 FIFO 上的 read 被取消后照常完成”覆盖 `EBUSY` 路径。TSan 构建不能替换全局
+  `operator new`，零分配断言在 TSan 下跳过。

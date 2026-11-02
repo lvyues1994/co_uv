@@ -145,6 +145,9 @@ template <class Derived, class Req, class T> class ReqAwaiter {
 
     Derived& derived() noexcept { return static_cast<Derived&>(*this); }
 
+    // 请求是否在途（已发起、回调尚未到来）。
+    bool inFlight() const noexcept { return state_ == State::pending; }
+
     Req req_{};
 
   private:

@@ -15,7 +15,7 @@ function(uvco_configure_test target)
 endfunction()
 
 foreach(name IN ITEMS result_tests loop_tests thread_tests req_awaiter_tests timer_tests
-                      sync_tests stream_tests udp_tests lifecycle_tests
+                      sync_tests stream_tests udp_tests fs_tests lifecycle_tests
                       run_wrong_thread_contract_test orphan_handle_use_contract_test timer_pending_destroy_contract_test
                       sync_event_destroy_contract_test sync_when_any_empty_contract_test
                       stream_concurrent_read_contract_test udp_concurrent_recv_contract_test)
@@ -36,6 +36,14 @@ endif()
 # Pipe 测试的套接字文件放在构建目录里。
 target_compile_definitions(uvco-stream-tests PRIVATE
     UVCO_TEST_PIPE_DIR="${CMAKE_CURRENT_BINARY_DIR}")
+
+# fs 测试的临时文件只放在构建目录里；io_uring 开 / 关各跑一遍（libuv ≥1.45 在 Linux 上可能
+# 把 fs 请求交给 io_uring，此时 uv_cancel 返回 EBUSY）。
+target_compile_definitions(uvco-fs-tests PRIVATE
+    UVCO_TEST_TMP_DIR="${CMAKE_CURRENT_BINARY_DIR}")
+set_tests_properties(uvco-fs-tests PROPERTIES ENVIRONMENT "UV_USE_IO_URING=1")
+add_test(NAME uvco-fs-tests-no-io-uring COMMAND uvco-fs-tests)
+set_tests_properties(uvco-fs-tests-no-io-uring PROPERTIES ENVIRONMENT "UV_USE_IO_URING=0")
 
 target_compile_definitions(uvco-req-awaiter-tests PRIVATE
     UVCO_TEST_SOURCE_FILE="${CMAKE_CURRENT_SOURCE_DIR}/req_awaiter_tests.cpp")
