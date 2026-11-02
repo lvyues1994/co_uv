@@ -22,7 +22,10 @@ uvco 用 [co2](https://github.com/lvyues1994/coro)（C++14 无栈协程库）封
   - `[[nodiscard]]`；`operator bool`、`value()`、`error()`、`message()`（`uv_strerror`）。
   - 可转换为 `std::error_code`（自定义 `uv_category()`）。
   - C++14 无 `std::expected`，自行实现轻量版本；`Result<void>` 特化。
-- 取消统一表现为 `UV_ECANCELED`。
+- 取消统一表现为 `UV_ECANCELED`（`Errc::canceled`）：只用于 stop_token 取消。
+- 操作因句柄被 `close()` / `stop()` 或 Loop 析构而结束 → uvco 专有的 `Errc::aborted`
+  （`UVCO_EABORTED`，取值远离 libuv 的错误码范围；`strerror` / `errorName` / `uv_category`
+  单独处理它）。调用者由此区分“我取消了”与“句柄没了”。
 - 协程体内的 C++ 异常（`bad_alloc`、用户异常）仍走 co2 的异常通道，`Result` 只承载 I/O 错误。
 
 ## 3. 线程模型
@@ -52,11 +55,29 @@ uvco/
   - 本地队列由一个 `uv_idle` 排空，远程队列由 `uv_async` 排空；排空时整批换出再逐个
     resume，新排队的协程留到下一批——不会在 libuv 回调中无限递归，I/O 回调可以穿插。
   - `post(detail::LoopCallback*)`：任意线程投递一个侵入式回调节点（零分配），用于取消（§4.3）。
+  - **保活**（借鉴 kotatsu 的 relay）：`uv_async` 默认 unref，只有跨线程工作在路上时才 ref。
+    计数 `keepAlive_`（互斥量保护）由 `run()`（根 Task 未完成期间）和用户的 `Loop::KeepAlive`
+    （`loop.keepAlive()`，loop 线程取得，只可移动，任意线程销毁）构成，0→1 时 `uv_ref`。
+    释放在锁内递减**并在锁内** `uv_async_send`；只有 async 回调末尾在锁内复查“计数为零且远程
+    队列为空”后才 `uv_unref`。因此 loop 不可能在最后一次唤醒发出之前判定空闲、返回并被销毁
+    （tests/keepalive_release_race_test.cpp 用 `--wrap=uv_async_send` 复现这一窗口）。
+  - `~Loop` 兜底（借鉴 kotatsu `~event_loop`）：句柄控制块登记在 Loop 上（`detail::LoopResident`）。
+    析构时循环：对仍打开的 uvco 句柄 `closeInternally()`（挂起操作以 `Errc::aborted` 结束）、
+    `uv_walk` 关闭其他句柄（close 回调把 `data` 置空）、`uv_run(ONCE)`，直到 loop 不再存活；
+    其间被恢复的协程新开的句柄也会在下一轮被关闭。然后关闭内部 async / idle，`uv_loop_close`
+    必须成功。仍被用户持有的控制块成为“孤儿”：之后只能 `close()` / 析构（直接释放），其他操作
+    契约违规。限制：析构时挂起中的 `Sleep`（内嵌 `uv_timer_t` 的请求）会被当作外部句柄关闭，
+    其等待者永远不会恢复——销毁 Loop 前应让所有 Task 结束。
+  - 首次构造 Loop 时（每进程一次）若 `SIGPIPE` 仍为默认动作则忽略它：写已关闭的连接返回
+    `EPIPE` 而不是杀死进程；用户设置过的动作不变。
 - `run(loop, task, token = {}) -> T`：loop 版 `syncWait`，启动 Task 并 `uv_run` 直到 Task 完成，
   然后返回值或重抛异常。可选的 `token` 作为整棵任务树的根 stop_token。
   - Task 若在别的线程上完成，完成通知先经 `schedule()` 回到 loop 线程，再停止 `uv_run`。
   - **不**关闭、不排空用户句柄（与 §7 “用户持有 Loop”一致，同一 loop 可多次 `run()`）。
-    剩余句柄/请求由用户负责；`~Loop` 时若 `uv_loop_close` 返回 `EBUSY` 即契约违规。
+    剩余句柄由用户负责，`~Loop` 兜底关闭（见上）。
+- `drain(loop)`：运行直到 loop 无事可做（无活动句柄 / 请求、无排队协程、无存活 KeepAlive），
+  例如 `co2::spawn(loop, task)` 之后。把工作交给 loop 看不见的线程再投递回来的代码必须持有
+  `KeepAlive`，否则 `drain()` 可能在投递到达前返回。
 - `detail::ReqAwaiter<Derived, Req, T>`（CRTP）：单次请求 awaiter 模板。
   - `Derived` 提供 `int start(uv_loop_t*)` 与 `Result<T> finish(int status)`；libuv 回调里调用
     `complete(req, status)`。可选 `static constexpr bool cancellable = false` 与自定义 `cancel()`
@@ -85,9 +106,11 @@ uvco/
   - `close()` 返回 `CloseAwaiter`（`[[nodiscard]]`），并**立即置空**所有者（之后 `isOpen()==false`，
     析构不再触碰控制块）。等待它直到 close 回调执行；未被等待的 `CloseAwaiter` 在析构时仍会发起关闭。
     对空句柄 `close()` 为空操作。
-  - 扩展：`close()` 时若有挂起操作，以 `UV_ECANCELED` 中止它们（经 `loop.schedule` 延后恢复），
+  - 扩展：`close()` 时若有挂起操作，以 `Errc::aborted` 中止它们（经 `loop.schedule` 延后恢复），
     而不是契约违规——显式 close 是合法的“取消一切”手段；只有直接析构才算违规。
-  - 句柄可以在 Loop 析构之前一刻销毁：`~Loop` 会跑一次 `uv_run(NOWAIT)` 处理待关闭句柄。
+  - 句柄可以在 Loop 析构之前一刻销毁；也可以比 Loop 活得久：`~Loop` 关闭它并把控制块变为孤儿
+    （§4.1），孤儿句柄的 `close()` / 析构只是释放控制块，其他操作是契约违规
+    （tests/orphan_handle_use_contract_test.cpp）。
   - 所有权与关闭分离（stream 引入）：`HandleBlock::release(closeWaiter)` 由所有者调用恰好一次
     （close / 析构 / CloseAwaiter），`closeInternally()` 可由库内部提前发起关闭（如取消 connect），
     此时所有者仍持有控制块（`isOpen()==true`），后续操作返回 `UV_EBADF`，`close()` 仍可等待。
@@ -124,8 +147,8 @@ uvco/
   - `Timer t{loop}; t.start(timeout, repeat)`；`stop()`、`setRepeat()/repeat()`、`dueIn()`、`isActive()`。
   - `tick() -> Result<std::uint64_t>`：返回自上次 tick 以来的到期次数（无人等待时累计，类似 timerfd）；
     已有累计则立即返回。未启动 / 一次性已耗尽 → `UV_EINVAL`。同一时刻只允许一个等待者（契约）。
-  - stop_token 取消 tick → `UV_ECANCELED`，**定时器继续运行**；`stop()` / `close()` 使挂起的 tick
-    以 `UV_ECANCELED` 结束。
+  - stop_token 取消 tick → `UV_ECANCELED`，**定时器继续运行**；`stop()` / `close()` / Loop 析构使
+    挂起的 tick 以 `Errc::aborted` 结束。
 
 ### 4.5 sync（loop 内单线程原语）
 
@@ -244,10 +267,14 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
   - read：`uv_read_stop` 并以 `UV_ECANCELED` 完成；流保持可用，未读数据不丢失。
   - accept：以 `UV_ECANCELED` 完成；监听继续，之后可再 accept。
   - connect：libuv 无法取消进行中的 connect，因此**取消 = 关闭流**（`closeInternally()`），connect 以
-    `UV_ECANCELED` 完成；之后该流上的操作返回 `UV_EBADF`，仍需（也可以）`close()` / 析构。
+    `UV_ECANCELED` 完成（同一流上其他挂起操作以 `Errc::aborted` 结束）；之后该流上的操作返回
+    `UV_EBADF`，仍需（也可以）`close()` / 析构。
   - write / shutdown：发起后不可取消（只在发起前检查停止）；`timeout(write)` 不能截断已排队的写，
     要中止只能 `close()`。
-  - `close()` 中止所有挂起的 read / write / accept / connect，均以 `UV_ECANCELED` 结束（延后恢复）。
+  - `close()`（或 Loop 析构）中止所有挂起的 read / write / accept / connect / shutdown，均以
+    `Errc::aborted` 结束（read / accept 延后恢复；write / shutdown / connect 由 libuv 回调的
+    `ECANCELED` 映射而来——不可取消的 write / shutdown 的 `ECANCELED` 只可能来自 close，connect 记录
+    是否由 stop_token 发起取消）。
     被中止或失败的写不报告已写字节数。
 - 在已（内部）关闭的流上 read / write / accept / connect / shutdown → `UV_EBADF`。
 - 恢复策略同 §4.5：libuv 回调与取消节点中内联恢复；close 中止延后恢复。
@@ -298,8 +325,8 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
   FetchContent。co2 的预览版包不接受数值版本号，因此 `find_package(co2 CONFIG)` 不带版本；
   FetchContent 固定到一个提交（`UVCO_CO2_GIT_TAG`）。
 - **契约而非异常**：`Result::value()` / `error()` 用错状态、在非 loop 线程调用 libuv 相关接口、
-  带着挂起请求析构 awaiter、带着打开的句柄析构 Loop——都是契约违规（走 co2 的契约处理器），
-  不抛异常。
+  带着挂起请求析构 awaiter、带着存活的 `KeepAlive` 析构 Loop、在 Loop 析构后使用孤儿句柄——
+  都是契约违规（走 co2 的契约处理器），不抛异常。（带着打开的句柄析构 Loop 已不再违规，见 §4.1。）
 
 ## 8. 待定问题
 
@@ -317,18 +344,23 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
 - whenAny 在分支续体中移动分支结果：结果类型的移动构造抛异常 → `std::terminate`（续体无处报告）。
 - whenAny 与 `co2::whenAll` 各自实现；kotatsu 用一个 `when_op` 同时实现 all / any，可在 co2 侧统一。
 - sync 原语不支持跨线程使用；跨线程通信目前只能经 `scheduleOn(loop)` 回到 loop 线程再操作。
-- 计时测试有毫秒级容差（如 20ms sleep 断言 ≥19ms，libuv 时钟为毫秒截断）。
+- 计时测试有毫秒级容差（如 20ms sleep 断言 ≥18ms，libuv 时钟为毫秒截断，ASan 下偶见 19ms）。
 - stream：无 `Tty`；Pipe 不支持 IPC（传递句柄）与 Linux 抽象套接字（`uv_pipe_bind2` 需 libuv ≥1.46，
   而最低版本为 1.40）；不能在不关闭流的情况下取消写；connect 取消会关闭流；Windows 行为未测试
   （命名管道、`uv_try_write` 语义不同）。
 - stream 依赖 libuv 的若干实现行为（已在 1.48 源码核对）：无 accept 时保留一个已接受 fd 并停止监听、
   `READING` 标志清除后读循环立即停止、关闭时以 `UV_ECANCELED` 回调 connect / write。
+- `~Loop` 无法恢复挂起中的 `Sleep`（它的 `uv_timer_t` 被当作外部句柄关闭）；可考虑让 `Sleep`
+  也登记为 LoopResident。
+- 远程投递（`schedule` / `post`）的线程若既不在 `run()` 期间、也不持有 `KeepAlive`，与 `drain()` /
+  `~Loop` 竞争（`~Loop` 发现未处理的远程工作即契约违规）。
+- 保活释放竞争测试依赖 GNU ld / lld 的 `--wrap`，只在 Linux 上构建。
 - 尚未提供 install / export 规则（目前只支持 `add_subdirectory` / FetchContent 方式使用）。
 
 ## 9. 与原设计的偏差（实现 core 时记录）
 
 - §4.1 原写“`run()` 完成后关闭并排空剩余句柄”：与 §7 用户持有 Loop 冲突，改为 `run()` 只驱动；
-  句柄清理交给用户，`~Loop` 检查。
+  句柄清理交给用户，`~Loop` 检查。（后由“借鉴 kotatsu 改进 core 时记录”改为 `~Loop` 兜底关闭。）
 - §4.1 本地队列明确使用 `uv_idle`，远程队列使用 `uv_async`；远程队列为互斥量保护的 vector
   而非无锁 MPSC（足够简单，且锁内 `uv_async_send` 解决了 Loop 销毁竞态）。
 - §4.1 `ReqAwaiter` 模板参数改为 `<Derived, Req, T>`（CRTP），以便每种请求自定义发起、完成与取消。
@@ -337,7 +369,7 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
 
 ### 实现 timer 时记录
 
-- §4.2 扩展：`close()` 中止挂起操作（`UV_ECANCELED`）；`close()` 后所有者立即为空；未等待的 close 仍关闭。
+- §4.2 扩展：`close()` 中止挂起操作（`UV_ECANCELED`，后改为 `Errc::aborted`）；`close()` 后所有者立即为空；未等待的 close 仍关闭。
 - §4.3 取消机制抽成 `detail::CancelHook`，供请求与句柄共用。
 - §4.4 时长用 `std::chrono::milliseconds`；`tick()` 返回到期次数（`Result<uint64_t>`）而非 `Result<void>`；
   stop_token 取消 tick 不停止定时器；启动前 `uv_update_time`。
@@ -363,7 +395,7 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
 - EOF / 读错误粘性；并发 read、并发 accept 为契约违规（原设计未规定）。
 - accept 为拉模式，背压依赖 libuv 的“保留一个已接受 fd”行为；预先创建的对端控制块在失败时复用。
 - connect 无法真正取消：取消即关闭流（§4.2 增加 `release()` / `closeInternally()` / 所有者标志）。
-- write / shutdown 发起后不可取消；`close()` 以 `UV_ECANCELED` 中止它们。
+- write / shutdown 发起后不可取消；`close()` 以 `UV_ECANCELED`（后改为 `Errc::aborted`）中止它们。
 - `Tcp` / `Pipe` 提供空的默认构造（便于作协程帧局部变量与接收 accept 结果）。
 - `connect` 接受 `SocketAddress`（而非原写的 `sockaddr` / `ip4_addr` / `ip6_addr` 三种形式）。
 - 新增错误码 `Errc::bad_descriptor`（`UV_EBADF`）、`Errc::not_connected`（`UV_ENOTCONN`）。
@@ -381,3 +413,17 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
 - 父 token 已停止时不启动分支（先看取消，与其他原语一致）；比赛决出后不再启动后续分支
   （原为“之后的分支照常启动并看到 stop”），同 kotatsu“立即结束的 stop 阻止任务启动”。
 - `timeout` 泛化为任意 awaitable，op 先于计时器启动；新增 `runUntil(op, stops...)`。
+
+### 借鉴 kotatsu 改进 core 时记录
+
+参照 kotatsu（clice-io/kotatsu `src/async/runtime/loop.cpp`、`tests/async/relay_release`）：
+
+- §4.1 `uv_async` 由“`run()` 期间 ref”改为“保活计数非零时 ref”：新增 `Loop::KeepAlive` 与
+  `drain(loop)`；释放在锁内递减并唤醒，async 回调末尾锁内复查后才 unref。审计结论：旧实现
+  在 `run()` 期间始终 ref，因此没有 kotatsu 修复过的那个竞态；新协议照搬 kotatsu 的“锁内释放 +
+  回调末尾复查”，并加了 `--wrap=uv_async_send` 回归测试（把锁外发送的变体改回来，测试即失败）。
+- §4.1 / §4.2 `~Loop` 不再在 `EBUSY` 时契约违规：关闭登记的 uvco 句柄与外部句柄，`UV_RUN_ONCE`
+  直到 loop 不再存活，剩余控制块成为孤儿。
+- §4.1 首次构造 Loop 时忽略 `SIGPIPE`（仍为默认动作时）。
+- §2 新增 `Errc::aborted`：close / stop / Loop 析构中止的操作不再报告 `UV_ECANCELED`；stop_token
+  取消仍为 `Errc::canceled`。sync 原语没有“被关闭中止”的路径（Channel 关闭仍为 `EOF` / `EPIPE`）。

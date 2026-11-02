@@ -15,8 +15,8 @@ function(uvco_configure_test target)
 endfunction()
 
 foreach(name IN ITEMS result_tests loop_tests thread_tests req_awaiter_tests timer_tests
-                      sync_tests stream_tests
-                      run_wrong_thread_contract_test timer_pending_destroy_contract_test
+                      sync_tests stream_tests lifecycle_tests
+                      run_wrong_thread_contract_test orphan_handle_use_contract_test timer_pending_destroy_contract_test
                       sync_event_destroy_contract_test sync_when_any_empty_contract_test
                       stream_concurrent_read_contract_test)
     string(REPLACE "_" "-" target "uvco-${name}")
@@ -24,6 +24,14 @@ foreach(name IN ITEMS result_tests loop_tests thread_tests req_awaiter_tests tim
     uvco_configure_test(${target})
     add_test(NAME ${target} COMMAND ${target})
 endforeach()
+
+# 保活释放竞争测试需要 GNU ld / lld 的 --wrap（ELF 平台）。
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT MSVC)
+    add_executable(uvco-keepalive-release-race-test keepalive_release_race_test.cpp)
+    uvco_configure_test(uvco-keepalive-release-race-test)
+    target_link_options(uvco-keepalive-release-race-test PRIVATE "-Wl,--wrap=uv_async_send")
+    add_test(NAME uvco-keepalive-release-race-test COMMAND uvco-keepalive-release-race-test)
+endif()
 
 # Pipe 测试的套接字文件放在构建目录里。
 target_compile_definitions(uvco-stream-tests PRIVATE

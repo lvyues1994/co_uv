@@ -22,6 +22,10 @@
 // run() 返回时只保证这个 Task 已经完成；同一 loop 上的其他协程与句柄保持原样
 // （Loop 由用户持有，见 docs/architecture.md §7），下一次 run() 会继续驱动它们。
 // Task 的异常在这里重抛。
+//
+// drain(loop)：运行直到 loop 无事可做——没有活动的句柄 / 请求、没有排队的协程、没有存活的
+// Loop::KeepAlive（例如 spawn 到 loop 上的根 Task、还开着的服务端）。把工作交给别的线程
+// 再投递回来的代码必须持有 KeepAlive，否则 drain() 可能在投递到达之前返回。
 
 namespace uvco {
 namespace detail {
@@ -68,5 +72,7 @@ template <class T> T run(Loop& loop, co2::Task<T> task, co2::stop_token token = 
     if (not completion.finished) loop.runUntilStopped(completion.finished);
     return co2::detail::TaskAccess::takeResult(task);
 }
+
+inline void drain(Loop& loop) { loop.runUntilIdle(); }
 
 } // namespace uvco

@@ -567,13 +567,13 @@ auto closeScenario(uvco::Loop& loop, Tcp& server, Tcp& client, Tcp& conn, std::v
     CO2_AWAIT(connectPair(server, client, conn));
     CO2_AWAIT_SET(rs, co2::whenAll(pendingRead(client, buf), pendingWrite(client, big),
                                    pendingAccept(server), closer(loop, client, server)));
-    CHECK(not std::get<0>(rs) && std::get<0>(rs).error() == Errc::canceled);
-    CHECK(not std::get<1>(rs) && std::get<1>(rs).error() == Errc::canceled);
-    CHECK(std::get<2>(rs) == Errc::canceled);
+    CHECK(not std::get<0>(rs) && std::get<0>(rs).error() == Errc::aborted);
+    CHECK(not std::get<1>(rs) && std::get<1>(rs).error() == Errc::aborted);
+    CHECK(std::get<2>(rs) == Errc::aborted);
 }
 CO2_END
 
-TEST_CASE("Tcp: close() with pending read, write and accept -> ECANCELED") {
+TEST_CASE("Tcp: close() with pending read, write and accept -> aborted") {
     uvco::Loop loop;
     Tcp server{loop};
     Tcp client{loop};

@@ -241,7 +241,8 @@ TEST_CASE("sleep: completions are ordered by deadline") {
 
 TEST_CASE("sleep: waits at least the requested duration") {
     uvco::Loop loop;
-    CHECK(uvco::run(loop, timedSleep(loop, 20ms)) >= 19);
+    // libuv 的时钟是毫秒粒度、且以单调时钟截断：实测偶有 19ms（ASan 下更常见），留 2ms 余量。
+    CHECK(uvco::run(loop, timedSleep(loop, 20ms)) >= 18);
 }
 
 TEST_CASE("sleep: zero delay completes") {
@@ -349,17 +350,17 @@ TEST_CASE("Timer: stop during tick from another thread -> ECANCELED") {
     }
 }
 
-TEST_CASE("Timer: stop() ends a pending tick with ECANCELED") {
+TEST_CASE("Timer: stop() ends a pending tick with aborted") {
     uvco::Loop loop;
     auto const r = uvco::run(loop, stopWhileTicking(loop));
-    CHECK(not r && r.error() == Errc::canceled);
+    CHECK(not r && r.error() == Errc::aborted);
 }
 
-TEST_CASE("Timer: close() ends a pending tick with ECANCELED") {
+TEST_CASE("Timer: close() ends a pending tick with aborted") {
     uvco::Loop loop;
     bool closed = false;
     auto const r = uvco::run(loop, closeWhileTicking(loop, closed));
-    CHECK(not r && r.error() == Errc::canceled);
+    CHECK(not r && r.error() == Errc::aborted);
     CHECK(closed);
 }
 

@@ -25,7 +25,8 @@
 //   CO2_AWAIT_SET(r, tcp.write(uvco::buffer(data)));  // Result<void>
 //
 // connect 被取消时 libuv 无法撤回连接请求，于是整个 Tcp 被关闭：connect 返回
-// ECANCELED，之后的操作返回 Errc::bad_descriptor，只能 close()/析构。
+// ECANCELED（同一个流上其他挂起的操作以 Errc::aborted 结束），之后的操作返回
+// Errc::bad_descriptor，只能 close()/析构。
 
 namespace uvco {
 

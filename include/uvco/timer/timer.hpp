@@ -30,7 +30,7 @@
 //   - 计时器未启动（或一次性计时器已到期并被取走）：立即返回 UV_EINVAL；
 //   - 否则挂起直到下一次到期。同一时刻只能有一个 tick() 在等待（契约）。
 //   - 取消：stop_token 被请求 → UV_ECANCELED（计时器本身继续运行，累计不丢失）；
-//     stop() 或 close() 时挂起中的 tick() 也以 UV_ECANCELED 结束。
+//     stop()、close() 或 Loop 析构时挂起中的 tick() 以 Errc::aborted 结束。
 //
 // tick() 返回的 awaiter 只含一个指针（放进 co2 的内联槽，零分配），应立即等待。
 // 生命周期见 core/handle.hpp：析构时若有挂起的 tick() 是契约违规。
@@ -65,7 +65,7 @@ class TimerBlock final : public HandleBlock {
     void stop() noexcept {
         static_cast<void>(uv_timer_stop(&timer_));
         expirations_ = 0;
-        if (state_ == State::pending) finishTick(UV_ECANCELED, Resume::later);
+        if (state_ == State::pending) finishTick(UVCO_EABORTED, Resume::later);
     }
 
     // ---- tick() awaiter ----
@@ -114,7 +114,7 @@ class TimerBlock final : public HandleBlock {
     uv_handle_t* uvHandle() noexcept override { return reinterpret_cast<uv_handle_t*>(&timer_); }
 
     void abortPending() noexcept override {
-        if (state_ == State::pending) finishTick(UV_ECANCELED, Resume::later);
+        if (state_ == State::pending) finishTick(UVCO_EABORTED, Resume::later);
     }
 
     static void onTimer(uv_timer_t* const timer) noexcept {
@@ -179,7 +179,7 @@ class Timer : public detail::Handle<detail::TimerBlock> {
         return block().start(detail::toMilliseconds(timeout), detail::toMilliseconds(repeat));
     }
 
-    // 停止；挂起中的 tick() 以 UV_ECANCELED 结束。清空累计。
+    // 停止；挂起中的 tick() 以 Errc::aborted 结束。清空累计。
     void stop() noexcept { block().stop(); }
 
     void setRepeat(std::chrono::milliseconds const repeat) noexcept {

@@ -31,13 +31,15 @@
 //                                       先 uv_try_write；没写完的部分 uv_write 排队，全部交给
 //                                       内核后完成。多个 write 可以并发，按调用顺序排队。
 //                                       一旦排队就不能取消（libuv 不支持），close() 会让它以
-//                                       ECANCELED 结束；出错时不知道写出了多少字节。
+//                                       Errc::aborted 结束；出错时不知道写出了多少字节。
 //   shutdown() -> Result<void>          等排队的写完成后关闭写端。不可取消。
 //   listen(backlog) / accept()          accept 拉模式：没有 accept 挂起时 libuv 保留一个
 //                                       待接受的连接并暂停监听 fd（连接留在内核 backlog）。
 //                                       同一时刻只能有一个 accept（契约）。可取消。
 //
 // 所有等待都遵守先停止规则：停止已请求时立即 ECANCELED，即使操作本可以立即完成。
+// close()（或 Loop 析构）时挂起中的 read/accept/write/shutdown/connect 以 Errc::aborted
+// 结束——与 stop_token 取消（Errc::canceled）区分。
 // 在已关闭的流（例如 connect 被取消后）上操作返回 Errc::bad_descriptor。
 
 namespace uvco {
@@ -182,8 +184,8 @@ class StreamBlock : public HandleBlock {
 
     void abortPending() noexcept override {
         // uv_close 已经停止读和监听。
-        if (readState_ == State::pending) finishRead(UV_ECANCELED, Resume::later);
-        if (acceptState_ == State::pending) finishAccept(UV_ECANCELED, Resume::later);
+        if (readState_ == State::pending) finishRead(UVCO_EABORTED, Resume::later);
+        if (acceptState_ == State::pending) finishAccept(UVCO_EABORTED, Resume::later);
         if (peer_ != nullptr) static_cast<void>(std::exchange(peer_, nullptr)->release({}));
     }
 
@@ -464,8 +466,9 @@ class WriteAwaiter {
     static void onWrite(uv_write_t* const req, int const status) noexcept {
         Req* const r = static_cast<Req*>(req->data);
         r->pending = false;
-        r->self->status_ = status;
-        r->waiter.resume(); // libuv 回调里内联恢复（close 导致的 ECANCELED 也在这里）
+        // write 不可取消：libuv 的 ECANCELED 只能来自 close。
+        r->self->status_ = status == UV_ECANCELED ? UVCO_EABORTED : status;
+        r->waiter.resume(); // libuv 回调里内联恢复
     }
 
     StreamBlock* block_;
@@ -495,7 +498,12 @@ template <class Derived, class Req> class StreamReqAwaiter : public ReqAwaiter<D
     }
 
     Result<void> finish(int const status) noexcept {
-        if (std::exchange(started_, false)) block_->endOp(); // 最后访问控制块
+        bool const began = std::exchange(started_, false);
+        bool const requested = std::exchange(cancelRequested_, false);
+        if (began) block_->endOp(); // 最后访问控制块
+        // 请求发起后 libuv 的 ECANCELED 来自 close：除非它正是 stop_token 取消（connect）
+        // 引起的，否则报告为 Errc::aborted。（发起前的先停止规则仍是 ECANCELED。）
+        if (began && status == UV_ECANCELED && not requested) return fromStatus(UVCO_EABORTED);
         return fromStatus(status);
     }
 
@@ -506,6 +514,7 @@ template <class Derived, class Req> class StreamReqAwaiter : public ReqAwaiter<D
 
     StreamBlock* block_;
     bool started_ = false;
+    bool cancelRequested_ = false;
 };
 
 class ShutdownAwaiter final : public StreamReqAwaiter<ShutdownAwaiter, uv_shutdown_t> {
@@ -520,12 +529,15 @@ class ShutdownAwaiter final : public StreamReqAwaiter<ShutdownAwaiter, uv_shutdo
 };
 
 // connect 的公共部分：libuv 无法取消连接请求，取消时关闭整个流（连接回调随后以
-// UV_ECANCELED 触发）；之后这个流只能 close()/析构。
+// UV_ECANCELED 触发，报告为 Errc::canceled）；之后这个流只能 close()/析构。
 template <class Derived>
 class ConnectAwaiterBase : public StreamReqAwaiter<Derived, uv_connect_t> {
   public:
     ConnectAwaiterBase(ConnectAwaiterBase&&) = default;
-    void cancel() noexcept { this->block_->closeInternally(); }
+    void cancel() noexcept {
+        this->cancelRequested_ = true;
+        this->block_->closeInternally();
+    }
 
   protected:
     using StreamReqAwaiter<Derived, uv_connect_t>::StreamReqAwaiter;

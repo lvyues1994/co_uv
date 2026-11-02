@@ -41,6 +41,17 @@ TEST_CASE("error_code conversion uses the uv category") {
     CHECK(std::string{uvco::errorName(Errc::no_such_file)} == "ENOENT");
 }
 
+TEST_CASE("Errc::aborted is uvco's own code, distinct from canceled") {
+    CHECK(Errc::aborted != Errc::canceled);
+    CHECK(uvco::toInt(Errc::aborted) == UVCO_EABORTED);
+    CHECK(std::string{uvco::errorName(Errc::aborted)} == "UVCO_EABORTED");
+    Result<void> r = Errc::aborted;
+    CHECK(std::string{r.message()}.find("aborted") != std::string::npos);
+    std::error_code const code = Errc::aborted;
+    CHECK(code.message() == r.message());
+    CHECK(uvco::fromStatus(UVCO_EABORTED).error() == Errc::aborted);
+}
+
 TEST_CASE("Result<void>") {
     Result<void> ok;
     CHECK(ok);
