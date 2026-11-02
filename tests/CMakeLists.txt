@@ -17,7 +17,8 @@ endfunction()
 foreach(name IN ITEMS result_tests loop_tests thread_tests req_awaiter_tests timer_tests
                       sync_tests stream_tests
                       run_wrong_thread_contract_test timer_pending_destroy_contract_test
-                      sync_event_destroy_contract_test stream_concurrent_read_contract_test)
+                      sync_event_destroy_contract_test sync_when_any_empty_contract_test
+                      stream_concurrent_read_contract_test)
     string(REPLACE "_" "-" target "uvco-${name}")
     add_executable(${target} ${name}.cpp)
     uvco_configure_test(${target})

@@ -132,9 +132,11 @@ uvco/
 - `Event`：set / wait。
 - `Mutex`：协程互斥锁，FIFO 唤醒。
 - `Channel<T>`：有界/无界，`send` / `recv`，`close()` 后 `recv` 返回 `UV_EOF` 类错误。
-- `whenAny(a, b, ...)`：一个分支完成后，用内部 `stop_source` 取消其余分支，
-  **等待所有分支以 ECANCELED 结束后**才返回（满足销毁契约）；返回胜出下标与结果。
-- `timeout(loop, ms, task)`：基于 `whenAny(task, sleep)`，超时返回 `UV_ETIMEDOUT`。
+- `whenAny(a, b, ...)`：分支是任意 awaitable（可异构）；第一个**成功**的分支胜出，
+  用内部 `stop_source` 取消其余分支，**等待所有已启动分支结束后**才返回；返回胜出下标与值。
+  分支以错误结束则比赛以该错误结束（规则参照 kotatsu `when_any`）。
+- `timeout(loop, ms, op)`：基于 `whenAny(op, sleep)`，超时返回 `UV_ETIMEDOUT`；
+  `runUntil(op, stops...)`：任一 stop 先成功 → op 被取消，`UV_ECANCELED`。
 
 实现（`include/uvco/sync/`，聚合头 `uvco/sync.hpp`）：
 
@@ -163,19 +165,36 @@ uvco/
     已缓冲的值仍可取完，之后才是 `UV_EOF`。
   - `trySend(v)` / `tryRecv()`：不挂起；满 / 空时 `UV_EAGAIN`（trySend 失败不移动实参），
     关闭后分别为 `UV_EPIPE` / `UV_EOF`。另有 `size()`、`capacity()`、`isClosed()`。
-- `whenAny(Task<T>...)` / `whenAny(std::vector<Task<T>>) -> WhenAnyResult<T>{index, value}`
-  （`T = void` 时只有 `index`）。
-  - 与 `co2::whenAll` 同构：awaiter 即操作状态，每分支一个手写续体帧，计数 N+1。内部 `stop_source`
-    经 `stop_callback` 链到父 token。
-  - 第一个完成（包括以异常结束）的分支 CAS 成为胜出者并 `request_stop()`；**等所有分支结束**后
-    恢复等待者。全部分支按顺序启动（启动途中已胜出时，之后的分支看到 stop 已请求）。
-  - 胜出者的异常在 `await_resume` 中重抛；落败者的结果与异常被丢弃。
-  - 分支可以在别的线程上完成；等待者在最后完成的分支所在线程恢复（同 whenAll）。
-  - 分支须同类型（`static_assert`）；空 vector 是契约违规。
-- `timeout(loop, ms, Task<Result<T>>) -> Result<T>`：`whenAny(task, 计时分支)`。task 胜出 → 它的结果
-  （含它自己的错误 / 异常）；计时分支胜出 → `UV_ETIMEDOUT`；父 token 取消 → 两边都结束，
-  计时分支先完成时为 `UV_ECANCELED`。task 忽略取消时，超时后仍要等它结束。返回 awaitable
-  （不是 Task）；计时分支是一个帧内放 `Sleep` 的小 Task。
+- `whenAny(a, b, ...) -> Result<WhenAnyResult<S...>>`（`sync/when_any.hpp`）
+  - 分支：任意 awaitable——`co2::Task<V>` 原样使用，其他 awaitable（`sleep`、`Channel::recv`、
+    句柄操作、`Event::wait`…）包成内部 `Task<V>`（每个一次帧分配）。`V` 是 `await_resume()` 的
+    decay 类型（引用结果被拷贝）。分支按值接收（Task 须 `std::move`）。
+  - 成功值 `S`：`V = Result<U>` → `U`（`Result<void>` → `void`）；普通 `V` → `V`（永远算成功）。
+  - `WhenAnyResult<S...>`：`index()`、成员 `get<I>()` 与自由函数 `uvco::get<I>(r)`（前置条件
+    `index() == I`，否则契约违规；void 分支的 `get` 返回 void）。C++14 无 `variant`：对齐的未初始化
+    存储 + 下标，移动 / 析构经下标查表分发。只可移动；默认构造为空（仅用作协程帧局部变量）。
+  - 结束分类：成功 / ECANCELED（取消，不算错误）/ 其他 Result 错误 / 异常。**第一个结束的分支**
+    （任何一类）CAS 决出比赛并 `request_stop()` 其余分支。
+  - 结果优先级：① 任一分支的异常（按结束顺序第一个）重抛；② 任一分支的第一个非取消错误
+    （**即使发生在胜者产生之后、落败者被取消途中**，同 kotatsu“取消途中也记录第一个错误”）；
+    ③ 决出者：成功 → 它的值，ECANCELED → `UV_ECANCELED`。被取消落败者的值被丢弃。
+  - 先看取消：`await_suspend` 时父 token 已请求停止 → 不启动任何分支，`UV_ECANCELED`。
+    比赛中途的父取消经 `stop_callback` 转发到内部 `stop_source`。
+  - 分支按参数顺序启动；**比赛已决出后尚未启动的分支不再启动**（直接随 awaiter 销毁）。
+    因此同步完成的分支之后的分支不会运行。
+  - 实现：awaiter 即操作状态（与 `co2::whenAll` 同构），每分支一个手写续体帧；计数 N+1，
+    启动方放下自己那份与未启动分支的份额。分支结果在续体中取出并分类（异常留在 Task 中）。
+    分支可以在别的线程上完成；等待者在最后结束的分支所在线程恢复。
+- `whenAny(std::vector<A>) -> Result<WhenAnyRangeResult<S>>{index, value}`（`S = void` 时只有 `index`）：
+  同类型分支，规则同上；空 vector 是契约违规（tests/sync_when_any_empty_contract_test.cpp）。
+- `timeout(loop, ms, op) -> Result<S>`（`sync/timeout.hpp`）= `whenAny(op, sleep(loop, ms))`：
+  op 先成功 → 它的值；计时器先到 → `UV_ETIMEDOUT`；op 的错误 / 异常按上面的优先级；父取消 →
+  `UV_ECANCELED`。op 先启动：op 同步完成时计时器不启动。op 忽略取消时超时后仍要等它结束。
+  op 可以是任意 awaitable（`Task<int>` → `Result<int>`，`sleep` → `Result<void>`，`ch.recv()` …）。
+- `runUntil(op, stops...) -> Result<S>` = `whenAny(stops..., op)`：任一 stop 先成功结束 → op 被取消，
+  `UV_ECANCELED`（stop 的值被丢弃，stop 的非取消错误照常传出）。stops 先启动：已满足的 stop
+  让 op 根本不启动（同 kotatsu `run_until`）。
+- `timeout` / `runUntil` 返回 awaitable（不是 Task），结果映射不额外占帧。
 
 #### 恢复策略（sync 与 timer 统一）
 
@@ -293,8 +312,10 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
   （按唤醒来源区分，timer 现有行为即符合）。
 - sync / whenAny 额外依赖 co2 `detail`：`ForwardStop`、`LateInit`、`HandleAccess::header`、
   `TaskAccess::arm/hasError/rethrowError/takeResult`（与 co2::whenAll 的实现方式相同）。
-- `timeout` 只接受 `Task<Result<T>>`；普通 `Task<T>` 需调用方自行包装（是否提供适配重载待定）。
-- whenAny 只支持同类型分支；异构分支需要 C++17 `variant` 或用户包装，暂不提供。
+- ~~`timeout` 只接受 `Task<Result<T>>`~~、~~whenAny 只支持同类型分支~~：已由 whenAny 重做解决
+  （任意 awaitable、异构分支，见 §4.5）。另依赖 co2 `detail::AwaiterOf`、`ResultStorage`。
+- whenAny 在分支续体中移动分支结果：结果类型的移动构造抛异常 → `std::terminate`（续体无处报告）。
+- whenAny 与 `co2::whenAll` 各自实现；kotatsu 用一个 `when_op` 同时实现 all / any，可在 co2 侧统一。
 - sync 原语不支持跨线程使用；跨线程通信目前只能经 `scheduleOn(loop)` 回到 loop 线程再操作。
 - 计时测试有毫秒级容差（如 20ms sleep 断言 ≥19ms，libuv 时钟为毫秒截断）。
 - stream：无 `Tty`；Pipe 不支持 IPC（传递句柄）与 Linux 抽象套接字（`uv_pipe_bind2` 需 libuv ≥1.46，
@@ -333,6 +354,7 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
 - 等待节点内嵌在 awaiter 中，`CancelHook` 仅在以可停止 token 挂起时分配。
 - Mutex 解锁时直接移交（不可插队），并提供 `scopedLock()` 返回 `Guard`。
 - `timeout` 只接受 `Task<Result<T>>`，返回 awaitable 而非 Task。
+- 以上前两条与最后一条中关于 whenAny / timeout 的语义已被“重做 whenAny 时记录”取代。
 
 ### 实现 stream 时记录
 
@@ -346,3 +368,16 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
 - `connect` 接受 `SocketAddress`（而非原写的 `sockaddr` / `ip4_addr` / `ip6_addr` 三种形式）。
 - 新增错误码 `Errc::bad_descriptor`（`UV_EBADF`）、`Errc::not_connected`（`UV_ENOTCONN`）。
 - `chunks()` 生成器未实现。
+
+### 重做 whenAny 时记录
+
+参照 kotatsu（clice-io/kotatsu `include/kota/async/runtime/when.h`）重做：
+
+- 变参 `whenAny` 接受异构、任意 awaitable，返回 `Result<WhenAnyResult<S...>>`（`index()` / `get<I>()`）；
+  vector 重载仍为同类型，返回 `Result<WhenAnyRangeResult<S>>{index, value}`。原 `WhenAnyResult<T>{index, value}` 删除。
+- 胜出规则由“第一个完成者（含异常）胜出”改为“第一个**成功**者胜出”：错误结束比赛并传出；
+  异常优先级最高，**落败者的异常不再被丢弃**；落败者在取消途中的非取消错误也会传出。
+- 总是包一层 `Result`（uvco 只有一种错误类型 `Errc`），因此异构分支的错误可以统一传出。
+- 父 token 已停止时不启动分支（先看取消，与其他原语一致）；比赛决出后不再启动后续分支
+  （原为“之后的分支照常启动并看到 stop”），同 kotatsu“立即结束的 stop 阻止任务启动”。
+- `timeout` 泛化为任意 awaitable，op 先于计时器启动；新增 `runUntil(op, stops...)`。

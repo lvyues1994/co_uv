@@ -535,9 +535,16 @@ auto throwAfter(uvco::Loop& loop, std::chrono::milliseconds d)
 }
 CO2_END
 
+auto failWith(Errc errc) CO2_BEG(co2::Task<uvco::Result<int>>, (errc)) {
+    CO2_RETURN(uvco::Result<int>{errc});
+}
+CO2_END
+
+using Any3 = uvco::Result<uvco::WhenAnyResult<int, int, int>>;
+
 auto firstWins(uvco::Loop& loop, std::vector<int>& cancelled)
-    CO2_BEG(co2::Task<uvco::WhenAnyResult<uvco::Result<int>>>, (loop, cancelled),
-            uvco::WhenAnyResult<uvco::Result<int>> r{0, uvco::Result<int>{Errc::canceled}};) {
+    CO2_BEG(co2::Task<Any3>, (loop, cancelled),
+            uvco::Result<uvco::WhenAnyResult<int, int, int>> r;) {
     CO2_AWAIT_SET(r, uvco::whenAny(sleepValue(loop, 10s, 1, cancelled),
                                    sleepValue(loop, 2ms, 2, cancelled),
                                    sleepValue(loop, 10s, 3, cancelled)));
@@ -545,46 +552,58 @@ auto firstWins(uvco::Loop& loop, std::vector<int>& cancelled)
 }
 CO2_END
 
-TEST_CASE("whenAny: first completion wins, losers are cancelled and awaited") {
+TEST_CASE("whenAny: first success wins, losers are cancelled and awaited") {
     uvco::Loop loop;
     std::vector<int> cancelled;
     auto const start = Clock::now();
     auto const r = uvco::run(loop, firstWins(loop, cancelled));
     CHECK(msSince(start) < 1000);
-    CHECK(r.index == 1U);
-    CHECK(r.value && *r.value == 2);
+    CHECK(r);
+    CHECK(r->index() == 1U);
+    CHECK(r->get<1>() == 2);
+    CHECK(uvco::get<1>(*r) == 2);
     // 两个落败者都已结束（取消回调的先后顺序不作保证）。
     std::sort(cancelled.begin(), cancelled.end());
     CHECK((cancelled == std::vector<int>{1, 3}));
 }
 
-auto syncWinner(uvco::Loop& loop, std::vector<int>& cancelled)
-    CO2_BEG(co2::Task<std::size_t>, (loop, cancelled),
-            uvco::WhenAnyResult<uvco::Result<int>> r{0, uvco::Result<int>{Errc::canceled}};) {
-    CO2_AWAIT_SET(r, uvco::whenAny(sleepValue(loop, 10s, 1, cancelled), readyValue(5),
-                                   sleepValue(loop, 10s, 3, cancelled)));
-    CHECK(r.value && *r.value == 5);
-    CO2_RETURN(r.index);
+auto markStarted(bool& started) CO2_BEG(co2::Task<uvco::Result<int>>, (started)) {
+    started = true;
+    CO2_RETURN(uvco::Result<int>{-1});
 }
 CO2_END
 
-TEST_CASE("whenAny: synchronous winner; later branches still start and see stop") {
+auto syncWinner(uvco::Loop& loop, std::vector<int>& cancelled, bool& lateStarted)
+    CO2_BEG(co2::Task<std::size_t>, (loop, cancelled, lateStarted),
+            uvco::Result<uvco::WhenAnyResult<int, int, int>> r;) {
+    CO2_AWAIT_SET(r, uvco::whenAny(sleepValue(loop, 10s, 1, cancelled), readyValue(5),
+                                   markStarted(lateStarted)));
+    CHECK(r);
+    CHECK(r->get<1>() == 5);
+    CO2_RETURN(r->index());
+}
+CO2_END
+
+TEST_CASE("whenAny: synchronous winner; branches after it are never started") {
     uvco::Loop loop;
     std::vector<int> cancelled;
+    bool lateStarted = false;
     auto const start = Clock::now();
-    CHECK(uvco::run(loop, syncWinner(loop, cancelled)) == 1U);
+    CHECK(uvco::run(loop, syncWinner(loop, cancelled, lateStarted)) == 1U);
     CHECK(msSince(start) < 1000);
-    CHECK(cancelled.size() == 2U);
+    CHECK((cancelled == std::vector<int>{1})); // 只有胜者之前启动的分支被取消
+    CHECK(not lateStarted);
 }
 
 auto slowLoser(uvco::Loop& loop, bool& finished, std::vector<int>& cancelled)
     CO2_BEG(co2::Task<std::size_t>, (loop, finished, cancelled),
-            uvco::WhenAnyResult<uvco::Result<int>> r{0, uvco::Result<int>{Errc::canceled}};) {
+            uvco::Result<uvco::WhenAnyResult<int, int>> r;) {
     CO2_AWAIT_SET(r, uvco::whenAny(stubborn(loop, 40ms, finished),
                                    sleepValue(loop, 2ms, 2, cancelled)));
     CHECK(finished); // 等到忽略取消的分支自己结束
-    CHECK(r.value && *r.value == 2);
-    CO2_RETURN(r.index);
+    CHECK(r);
+    CHECK(r->get<1>() == 2);
+    CO2_RETURN(r->index());
 }
 CO2_END
 
@@ -600,10 +619,11 @@ TEST_CASE("whenAny: waits for losers that ignore cancellation") {
 
 auto allSleep(uvco::Loop& loop, std::vector<int>& cancelled)
     CO2_BEG(co2::Task<uvco::Result<int>>, (loop, cancelled),
-            uvco::WhenAnyResult<uvco::Result<int>> r{0, uvco::Result<int>{Errc::canceled}};) {
+            uvco::Result<uvco::WhenAnyResult<int, int>> r;) {
     CO2_AWAIT_SET(r, uvco::whenAny(sleepValue(loop, 10s, 1, cancelled),
                                    sleepValue(loop, 10s, 2, cancelled)));
-    CO2_RETURN(std::move(r.value));
+    if (not r) CO2_RETURN(uvco::Result<int>{r.error()});
+    CO2_RETURN(uvco::Result<int>{r->index() == 0U ? r->get<0>() : r->get<1>()});
 }
 CO2_END
 
@@ -617,19 +637,39 @@ TEST_CASE("whenAny: parent cancellation (other thread) propagates to all branche
         auto const r = uvco::run(loop, allSleep(loop, cancelled), source.get_token());
         CHECK(msSince(start) < 1000);
         CHECK(not r && r.error() == Errc::canceled);
-        CHECK(cancelled.size() == 2U);
+        // 停止早于 whenAny 挂起：一个分支都不启动；停止落在启动途中：先启动的分支以
+        // ECANCELED 结束即决出比赛，之后的分支不再启动。启动了的分支都被取消。
+        CHECK(cancelled.size() <= 2U);
     }
+}
+
+auto alreadyStopped(bool& started) CO2_BEG(co2::Task<uvco::Result<int>>, (started),
+                                           uvco::Result<uvco::WhenAnyResult<int>> r;) {
+    CO2_AWAIT_SET(r, uvco::whenAny(markStarted(started)));
+    CHECK(not r);
+    CO2_RETURN(uvco::Result<int>{r.error()});
+}
+CO2_END
+
+TEST_CASE("whenAny: stop already requested -> ECANCELED, no branch starts") {
+    uvco::Loop loop;
+    co2::stop_source source;
+    source.request_stop();
+    bool started = false;
+    auto const r = uvco::run(loop, alreadyStopped(started), source.get_token());
+    CHECK(not r && r.error() == Errc::canceled);
+    CHECK(not started);
 }
 
 auto winnerThrows(uvco::Loop& loop, std::vector<int>& cancelled)
     CO2_BEG(co2::Task<std::size_t>, (loop, cancelled),
-            uvco::WhenAnyResult<uvco::Result<int>> r{0, uvco::Result<int>{Errc::canceled}};) {
+            uvco::Result<uvco::WhenAnyResult<int, int>> r;) {
     CO2_AWAIT_SET(r, uvco::whenAny(sleepValue(loop, 10s, 1, cancelled), throwAfter(loop, 1ms)));
-    CO2_RETURN(r.index);
+    CO2_RETURN(r->index());
 }
 CO2_END
 
-TEST_CASE("whenAny: the winner's exception is rethrown after all branches finish") {
+TEST_CASE("whenAny: an exception ends the race and is rethrown after all branches finish") {
     uvco::Loop loop;
     std::vector<int> cancelled;
     bool caught = false;
@@ -643,31 +683,222 @@ TEST_CASE("whenAny: the winner's exception is rethrown after all branches finish
 }
 
 auto loserThrows(uvco::Loop& loop, std::vector<int>& cancelled)
-    CO2_BEG(co2::Task<int>, (loop, cancelled),
-            uvco::WhenAnyResult<uvco::Result<int>> r{0, uvco::Result<int>{Errc::canceled}};) {
-    // throwAfter 在 sleep 被取消后照样抛出：落败者的异常被丢弃。
+    CO2_BEG(co2::Task<int>, (loop, cancelled), uvco::Result<uvco::WhenAnyResult<int, int>> r;) {
+    // throwAfter 在 sleep 被取消后照样抛出：异常优先级最高，即使来自落败者。
     CO2_AWAIT_SET(r, uvco::whenAny(throwAfter(loop, 10s), sleepValue(loop, 1ms, 7, cancelled)));
-    CHECK(r.index == 1U);
-    CO2_RETURN(*r.value);
+    CO2_RETURN(r->get<1>());
 }
 CO2_END
 
-TEST_CASE("whenAny: a loser's exception is discarded") {
+TEST_CASE("whenAny: a loser's exception beats the winner's value") {
     uvco::Loop loop;
     std::vector<int> cancelled;
-    CHECK(uvco::run(loop, loserThrows(loop, cancelled)) == 7);
+    bool caught = false;
+    try {
+        static_cast<void>(uvco::run(loop, loserThrows(loop, cancelled)));
+    } catch (std::runtime_error const&) {
+        caught = true;
+    }
+    CHECK(caught);
+}
+
+// d 后以 errc 失败；被取消时返回 onCancel。
+auto failAfter(uvco::Loop& loop, std::chrono::milliseconds d, Errc errc, Errc onCancel)
+    CO2_BEG(co2::Task<uvco::Result<std::string>>, (loop, d, errc, onCancel),
+            uvco::Result<void> r;) {
+    CO2_AWAIT_SET(r, uvco::sleep(loop, d));
+    CO2_RETURN(uvco::Result<std::string>{r ? errc : onCancel});
+}
+CO2_END
+
+auto errorEnds(uvco::Loop& loop, std::vector<int>& cancelled)
+    CO2_BEG(co2::Task<uvco::Result<int>>, (loop, cancelled),
+            uvco::Result<uvco::WhenAnyResult<int, std::string, std::string>> r;) {
+    CO2_AWAIT_SET(r, uvco::whenAny(sleepValue(loop, 10s, 1, cancelled),
+                                   failAfter(loop, 1ms, Errc::invalid_argument, Errc::canceled),
+                                   failAfter(loop, 10s, Errc::busy, Errc::canceled)));
+    CO2_RETURN(r ? uvco::Result<int>{0} : uvco::Result<int>{r.error()});
+}
+CO2_END
+
+TEST_CASE("whenAny: a non-cancel error ends the race and propagates") {
+    uvco::Loop loop;
+    std::vector<int> cancelled;
+    auto const start = Clock::now();
+    auto const r = uvco::run(loop, errorEnds(loop, cancelled));
+    CHECK(msSince(start) < 1000);
+    CHECK(not r && r.error() == Errc::invalid_argument);
+    CHECK((cancelled == std::vector<int>{1}));
+}
+
+auto loserFails(uvco::Loop& loop, std::vector<int>& cancelled)
+    CO2_BEG(co2::Task<uvco::Result<int>>, (loop, cancelled),
+            uvco::Result<uvco::WhenAnyResult<std::string, int>> r;) {
+    // 胜者先成功；落败者在被取消途中以非取消错误结束：错误照样传出（同 kotatsu）。
+    CO2_AWAIT_SET(r, uvco::whenAny(failAfter(loop, 10s, Errc::busy, Errc::broken_pipe),
+                                   sleepValue(loop, 1ms, 7, cancelled)));
+    CO2_RETURN(r ? uvco::Result<int>{r->get<1>()} : uvco::Result<int>{r.error()});
+}
+CO2_END
+
+TEST_CASE("whenAny: an error from a loser during cancellation beats the winner") {
+    uvco::Loop loop;
+    std::vector<int> cancelled;
+    auto const r = uvco::run(loop, loserFails(loop, cancelled));
+    CHECK(not r && r.error() == Errc::broken_pipe);
+}
+
+auto errorThenThrow(uvco::Loop& loop)
+    CO2_BEG(co2::Task<uvco::Result<int>>, (loop),
+            uvco::Result<uvco::WhenAnyResult<std::string, int>> r;) {
+    CO2_AWAIT_SET(r, uvco::whenAny(failAfter(loop, 1ms, Errc::busy, Errc::canceled),
+                                   throwAfter(loop, 10s)));
+    CO2_RETURN(uvco::Result<int>{r ? 0 : 1});
+}
+CO2_END
+
+TEST_CASE("whenAny: an exception beats an earlier error") {
+    uvco::Loop loop;
+    bool caught = false;
+    try {
+        static_cast<void>(uvco::run(loop, errorThenThrow(loop)));
+    } catch (std::runtime_error const&) {
+        caught = true;
+    }
+    CHECK(caught);
+}
+
+auto branchCancels(uvco::Loop& loop, std::vector<int>& cancelled)
+    CO2_BEG(co2::Task<uvco::Result<int>>, (loop, cancelled),
+            uvco::Result<uvco::WhenAnyResult<int, int>> r;) {
+    // 分支自己以 ECANCELED 结束（不是错误）：比赛以取消结束。
+    CO2_AWAIT_SET(r, uvco::whenAny(sleepValue(loop, 10s, 1, cancelled), failWith(Errc::canceled)));
+    CO2_RETURN(r ? uvco::Result<int>{0} : uvco::Result<int>{r.error()});
+}
+CO2_END
+
+TEST_CASE("whenAny: a branch ending with ECANCELED decides the race as cancelled") {
+    uvco::Loop loop;
+    std::vector<int> cancelled;
+    auto const r = uvco::run(loop, branchCancels(loop, cancelled));
+    CHECK(not r && r.error() == Errc::canceled);
+    CHECK((cancelled == std::vector<int>{1}));
+}
+
+// ---------------------------------------------------------------- 异构与 awaitable
+
+auto plainInt(uvco::Loop& loop, std::chrono::milliseconds d, int value)
+    CO2_BEG(co2::Task<int>, (loop, d, value), uvco::Result<void> r;) {
+    CO2_AWAIT_SET(r, uvco::sleep(loop, d));
+    CO2_RETURN(value);
+}
+CO2_END
+
+auto plainVoid(uvco::Loop& loop, std::chrono::milliseconds d, bool& done)
+    CO2_BEG(co2::Task<>, (loop, d, done), uvco::Result<void> r;) {
+    CO2_AWAIT_SET(r, uvco::sleep(loop, d));
+    if (r) done = true;
+}
+CO2_END
+
+using Mixed = uvco::WhenAnyResult<int, void, int, void, std::string>;
+
+auto mixed(uvco::Loop& loop, uvco::Channel<std::string>& ch, std::vector<int>& cancelled,
+           int winner, bool& voidDone)
+    CO2_BEG(co2::Task<std::size_t>, (loop, ch, cancelled, winner, voidDone),
+            uvco::Result<Mixed> r;) {
+    CO2_AWAIT_SET(r, uvco::whenAny(plainInt(loop, winner == 0 ? 1ms : 10s, 10),
+                                   plainVoid(loop, winner == 1 ? 1ms : 10s, voidDone),
+                                   sleepValue(loop, winner == 2 ? 1ms : 10s, 30, cancelled),
+                                   uvco::sleep(loop, winner == 3 ? 1ms : 10s), ch.recv()));
+    CHECK(r);
+    switch (r->index()) {
+    case 0: CHECK(r->get<0>() == 10); break;
+    case 1: r->get<1>(); CHECK(voidDone); break;
+    case 2: CHECK(r->get<2>() == 30); break;
+    case 3: break;
+    default: CHECK(r->get<4>() == "hello"); break;
+    }
+    CO2_RETURN(r->index());
+}
+CO2_END
+
+auto sendLater(uvco::Loop& loop, uvco::Channel<std::string>& ch)
+    CO2_BEG(co2::Task<>, (loop, ch), uvco::Result<void> r;) {
+    CO2_AWAIT_SET(r, uvco::sleep(loop, 1ms));
+    CO2_AWAIT_SET(r, ch.send(std::string{"hello"}));
+}
+CO2_END
+
+auto mixedWithSender(uvco::Loop& loop, uvco::Channel<std::string>& ch,
+                     std::vector<int>& cancelled, bool& voidDone)
+    CO2_BEG(co2::Task<std::size_t>, (loop, ch, cancelled, voidDone),
+            std::tuple<std::size_t> rs;) {
+    CO2_AWAIT_SET(rs, co2::whenAll(mixed(loop, ch, cancelled, 4, voidDone), sendLater(loop, ch)));
+    CO2_RETURN(std::get<0>(rs));
+}
+CO2_END
+
+TEST_CASE("whenAny: heterogeneous branches (Task<int>, Task<void>, Result, sleep, recv)") {
+    for (int winner = 0; winner < 4; ++winner) {
+        uvco::Loop loop;
+        uvco::Channel<std::string> ch{loop};
+        std::vector<int> cancelled;
+        bool voidDone = false;
+        auto const start = Clock::now();
+        CHECK(uvco::run(loop, mixed(loop, ch, cancelled, winner, voidDone)) ==
+              static_cast<std::size_t>(winner));
+        CHECK(msSince(start) < 1000);
+        CHECK(cancelled.size() == (winner == 2 ? 0U : 1U));
+    }
+    uvco::Loop loop;
+    uvco::Channel<std::string> ch{loop};
+    std::vector<int> cancelled;
+    bool voidDone = false;
+    CHECK(uvco::run(loop, mixedWithSender(loop, ch, cancelled, voidDone)) == 4U);
+    CHECK((cancelled == std::vector<int>{30}));
+    CHECK(not voidDone);
+}
+
+auto recvOrSleep(uvco::Loop& loop, uvco::Channel<int>& ch)
+    CO2_BEG(co2::Task<int>, (loop, ch), uvco::Result<uvco::WhenAnyResult<int, void>> r;) {
+    CO2_AWAIT_SET(r, uvco::whenAny(ch.recv(), uvco::sleep(loop, 10s)));
+    CHECK(r);
+    CO2_RETURN(r->index() == 0U ? r->get<0>() : -1);
+}
+CO2_END
+
+auto recvOrSleepResult(uvco::Loop& loop, uvco::Channel<int>& ch)
+    CO2_BEG(co2::Task<uvco::Result<int>>, (loop, ch),
+            uvco::Result<uvco::WhenAnyResult<int, void>> r;) {
+    CO2_AWAIT_SET(r, uvco::whenAny(ch.recv(), uvco::sleep(loop, 10s)));
+    CO2_RETURN(r ? uvco::Result<int>{r->index() == 0U ? r->get<0>() : -1}
+                 : uvco::Result<int>{r.error()});
+}
+CO2_END
+
+TEST_CASE("whenAny: awaitables directly; a ready recv wins and the timer never starts") {
+    uvco::Loop loop;
+    uvco::Channel<int> ch{loop, 1};
+    CHECK(ch.trySend(42));
+    auto const start = Clock::now();
+    CHECK(uvco::run(loop, recvOrSleep(loop, ch)) == 42);
+    CHECK(msSince(start) < 1000);
+    ch.close(); // 关闭：recv 返回 EOF 错误 → 比赛以 EOF 结束
+    auto const r = uvco::run(loop, recvOrSleepResult(loop, ch));
+    CHECK(not r && r.error() == Errc::eof);
 }
 
 auto rangeAny(uvco::Loop& loop, std::vector<int>& cancelled)
     CO2_BEG(co2::Task<std::size_t>, (loop, cancelled),
             std::vector<co2::Task<uvco::Result<int>>> tasks;
-            uvco::WhenAnyResult<uvco::Result<int>> r{0, uvco::Result<int>{Errc::canceled}};
-            int i{};) {
+            uvco::Result<uvco::WhenAnyRangeResult<int>> r{Errc::canceled}; int i{};) {
     for (i = 0; i < 16; ++i)
         tasks.push_back(sleepValue(loop, i == 9 ? 1ms : 10s, i, cancelled));
     CO2_AWAIT_SET(r, uvco::whenAny(std::move(tasks)));
-    CHECK(r.value && *r.value == 9);
-    CO2_RETURN(r.index);
+    CHECK(r);
+    CHECK(r->value == 9);
+    CO2_RETURN(r->index);
 }
 CO2_END
 
@@ -676,6 +907,24 @@ TEST_CASE("whenAny: vector overload") {
     std::vector<int> cancelled;
     CHECK(uvco::run(loop, rangeAny(loop, cancelled)) == 9U);
     CHECK(cancelled.size() == 15U);
+}
+
+auto rangeSleeps(uvco::Loop& loop)
+    CO2_BEG(co2::Task<std::size_t>, (loop), std::vector<uvco::Sleep> sleeps;
+            uvco::Result<uvco::WhenAnyRangeResult<void>> r{Errc::canceled}; int i{};) {
+    for (i = 0; i < 4; ++i)
+        sleeps.push_back(uvco::sleep(loop, i == 2 ? 1ms : 10s));
+    CO2_AWAIT_SET(r, uvco::whenAny(std::move(sleeps)));
+    CHECK(r);
+    CO2_RETURN(r->index);
+}
+CO2_END
+
+TEST_CASE("whenAny: vector of awaitables with a void success") {
+    uvco::Loop loop;
+    auto const start = Clock::now();
+    CHECK(uvco::run(loop, rangeSleeps(loop)) == 2U);
+    CHECK(msSince(start) < 1000);
 }
 
 auto onPool(co2::ThreadPool& pool, std::chrono::milliseconds d, int value)
@@ -689,13 +938,13 @@ CO2_END
 auto crossThread(uvco::Loop& loop, co2::ThreadPool& pool, std::vector<int>& cancelled,
                  bool poolWins)
     CO2_BEG(co2::Task<std::size_t>, (loop, pool, cancelled, poolWins),
-            uvco::WhenAnyResult<uvco::Result<int>> r{0, uvco::Result<int>{Errc::canceled}};) {
+            uvco::Result<uvco::WhenAnyResult<int, int>> r;) {
     CO2_AWAIT_SET(r, uvco::whenAny(onPool(pool, poolWins ? 0ms : 5ms, 1),
                                    sleepValue(loop, poolWins ? 10s : 0ms, 2, cancelled)));
     CO2_AWAIT(co2::scheduleOn(loop)); // 可能在线程池上恢复
     CHECK(loop.isLoopThread());
-    CHECK(r.value);
-    CO2_RETURN(r.index);
+    CHECK(r);
+    CO2_RETURN(r->index());
 }
 CO2_END
 
@@ -705,7 +954,8 @@ TEST_CASE("whenAny: branches on another thread; cancellation crosses threads") {
         uvco::Loop loop;
         std::vector<int> cancelled;
         CHECK(uvco::run(loop, crossThread(loop, pool, cancelled, true)) == 0U);
-        CHECK((cancelled == std::vector<int>{2}));
+        // 线程池分支可能在第二个分支启动前就已胜出：此时第二个分支不再启动。
+        CHECK((cancelled == std::vector<int>{2} || cancelled.empty()));
         cancelled.clear();
         CHECK(uvco::run(loop, crossThread(loop, pool, cancelled, false)) == 1U);
     }
@@ -717,11 +967,6 @@ auto timed(uvco::Loop& loop, std::chrono::milliseconds limit, co2::Task<uvco::Re
     CO2_BEG(co2::Task<uvco::Result<int>>, (loop, limit, task), uvco::Result<int> r{Errc::canceled};) {
     CO2_AWAIT_SET(r, uvco::timeout(loop, limit, std::move(task)));
     CO2_RETURN(std::move(r));
-}
-CO2_END
-
-auto failWith(Errc errc) CO2_BEG(co2::Task<uvco::Result<int>>, (errc)) {
-    CO2_RETURN(uvco::Result<int>{errc});
 }
 CO2_END
 
@@ -779,6 +1024,93 @@ TEST_CASE("timeout: exception from the task propagates") {
     }
     CHECK(caught);
 }
+
+auto timedRecv(uvco::Loop& loop, uvco::Channel<int>& ch, std::chrono::milliseconds limit)
+    CO2_BEG(co2::Task<uvco::Result<int>>, (loop, ch, limit), uvco::Result<int> r{Errc::canceled};) {
+    CO2_AWAIT_SET(r, uvco::timeout(loop, limit, ch.recv()));
+    CO2_RETURN(std::move(r));
+}
+CO2_END
+
+auto timedPlain(uvco::Loop& loop) CO2_BEG(co2::Task<uvco::Result<int>>, (loop),
+                                          uvco::Result<int> r{Errc::canceled};
+                                          uvco::Result<void> s;) {
+    CO2_AWAIT_SET(r, uvco::timeout(loop, 10s, plainInt(loop, 1ms, 5))); // Task<int> → Result<int>
+    CHECK(r && *r == 5);
+    CO2_AWAIT_SET(s, uvco::timeout(loop, 10s, uvco::sleep(loop, 1ms))); // Result<void>
+    CHECK(s);
+    CO2_AWAIT_SET(s, uvco::timeout(loop, 1ms, uvco::sleep(loop, 10s)));
+    CHECK(not s && s.error() == Errc::timed_out);
+    CO2_RETURN(std::move(r));
+}
+CO2_END
+
+TEST_CASE("timeout: any awaitable (Channel::recv, sleep, plain Task<int>)") {
+    uvco::Loop loop;
+    uvco::Channel<int> ch{loop, 1};
+    auto const start = Clock::now();
+    auto const miss = uvco::run(loop, timedRecv(loop, ch, 5ms));
+    CHECK(not miss && miss.error() == Errc::timed_out);
+    CHECK(ch.trySend(9));
+    auto const hit = uvco::run(loop, timedRecv(loop, ch, 10s));
+    CHECK(hit && *hit == 9);
+    CHECK(uvco::run(loop, timedPlain(loop)));
+    CHECK(msSince(start) < 1000);
+}
+
+auto untilEvent(uvco::Loop& loop, uvco::Event& stop, std::vector<int>& cancelled,
+                std::chrono::milliseconds work)
+    CO2_BEG(co2::Task<uvco::Result<int>>, (loop, stop, cancelled, work),
+            uvco::Result<int> r{Errc::canceled};) {
+    CO2_AWAIT_SET(r, uvco::runUntil(sleepValue(loop, work, 1, cancelled), stop.wait()));
+    CO2_RETURN(std::move(r));
+}
+CO2_END
+
+auto setLater(uvco::Loop& loop, uvco::Event& event, std::chrono::milliseconds d)
+    CO2_BEG(co2::Task<>, (loop, event, d), uvco::Result<void> r;) {
+    CO2_AWAIT_SET(r, uvco::sleep(loop, d));
+    event.set();
+}
+CO2_END
+
+auto untilEventSetLater(uvco::Loop& loop, uvco::Event& stop, std::vector<int>& cancelled)
+    CO2_BEG(co2::Task<uvco::Result<int>>, (loop, stop, cancelled),
+            std::tuple<uvco::Result<int>> rs{uvco::Result<int>{Errc::canceled}};) {
+    CO2_AWAIT_SET(rs, co2::whenAll(untilEvent(loop, stop, cancelled, 10s), setLater(loop, stop, 2ms)));
+    CO2_RETURN(std::move(std::get<0>(rs)));
+}
+CO2_END
+
+TEST_CASE("runUntil: a stop cancels the operation -> ECANCELED; otherwise the value") {
+    {
+        uvco::Loop loop;
+        uvco::Event stop{loop};
+        std::vector<int> cancelled;
+        auto const start = Clock::now();
+        auto const r = uvco::run(loop, untilEventSetLater(loop, stop, cancelled));
+        CHECK(not r && r.error() == Errc::canceled);
+        CHECK((cancelled == std::vector<int>{1}));
+        CHECK(msSince(start) < 1000);
+    }
+    {
+        uvco::Loop loop;
+        uvco::Event stop{loop};
+        std::vector<int> cancelled;
+        auto const r = uvco::run(loop, untilEvent(loop, stop, cancelled, 1ms));
+        CHECK(r && *r == 1);
+    }
+    {
+        // stop 已满足：先启动的 stop 同步结束，主操作根本不启动。
+        uvco::Loop loop;
+        uvco::Event stop{loop, true};
+        std::vector<int> cancelled;
+        auto const r = uvco::run(loop, untilEvent(loop, stop, cancelled, 10s));
+        CHECK(not r && r.error() == Errc::canceled);
+        CHECK(cancelled.empty());
+    }
+}
+
 
 } // namespace
 
