@@ -282,8 +282,28 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
 
 ### 4.7 udp
 
-- `Udp::bind`、`send(addr, buf) -> Result<void>`、`recv(buf) -> Result<Datagram>`（含来源地址）。
-- 读取同 stream：有等待者时 `uv_udp_recv_start`，否则 stop。
+- `Udp::bind`、`connect` / `disconnect`、`send(addr, buf)` / `send(buf)`（已连接）`-> Result<void>`、
+  `recv(buf) -> Result<Datagram>`（`size`、来源地址 `sender`、`truncated`）、`localAddress` /
+  `peerAddress`、`setBroadcast` / `setTtl`。实现在 `include/uvco/udp/udp.hpp`。
+- 读取同 stream 的拉模式：只有 `recv()` 挂起时才接收，`onAlloc` 直接交出等待者的缓冲区，
+  每次 `recv()` 恰好一个数据报；本轮已交付后 `onAlloc` 交出空缓冲区，libuv 以 `UV_ENOBUFS` 回调，
+  数据留在内核里。
+- **不在 recv 回调里停止或恢复**（借鉴 kotatsu `src/async/io/udp.cpp`：Linux 上 libuv 在 EPOLLERR
+  之后读错误队列时断言套接字仍在接收）：完成经 `loop.schedule` 推迟到本轮回调之后恢复；
+  “没有等待者就 `uv_udp_recv_stop`”也是一个推迟任务（控制块内的手写协程帧，排队期间以
+  `holdBegin()` 保活控制块，不算用户的挂起操作）。被恢复的协程立刻再次 `recv()` 时推迟的停止
+  看到新的等待者，什么也不做，于是连续接收不会反复 start / stop。
+- **没有等待者时到达的数据报不排队**：留在内核的套接字缓冲区（满了由内核丢弃），与 TCP 读的
+  背压一致，零拷贝、无额外分配。kotatsu 在用户态排一个最多 64 个的队列并复制成 `std::string`；
+  我们不这样做，需要更深缓冲的调用者可以加大 `SO_RCVBUF` 或保持一个 `recv()` 常挂起。
+  没有等待者时 libuv 报告的错误保存一个，交给下一次 `recv()`。
+- 缓冲区比数据报小：多余部分被丢弃（`UV_UDP_PARTIAL` → `truncated`）。空数据报正常收发
+  （`size == 0`；libuv 的“0 字节、无地址”是“已读空”，被忽略）。
+- send：快路径 `uv_udp_try_send`，`EAGAIN` 时才分配 `uv_udp_send_t`；目标地址按值复制
+  （`sockaddr_in6`），awaiter 放得进 co2 的内联槽。发起后不可取消；超过 65535 字节 → `EMSGSIZE`。
+- 取消 `recv` → `Errc::canceled`（先停止规则同 stream）；`close()` / Loop 析构 → 挂起的 recv / send
+  以 `Errc::aborted` 结束。同一套接字上同时两个 `recv()` 是契约违规。
+- 已连接套接字收到 ICMP 端口不可达时 `recv()` 返回 `Errc::connection_refused`，套接字仍可用。
 
 ### 4.8 fs
 
@@ -427,3 +447,11 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
 - §4.1 首次构造 Loop 时忽略 `SIGPIPE`（仍为默认动作时）。
 - §2 新增 `Errc::aborted`：close / stop / Loop 析构中止的操作不再报告 `UV_ECANCELED`；stop_token
   取消仍为 `Errc::canceled`。sync 原语没有“被关闭中止”的路径（Channel 关闭仍为 `EOF` / `EPIPE`）。
+
+### 实现 udp（第 5 步）时记录
+
+- §4.7 原写“有等待者时 `uv_udp_recv_start`，否则 stop”：停止不在 recv 回调里做，推迟到下一轮
+  （见 §4.7）；完成也推迟恢复，而 stream 的 read 在回调里内联恢复。
+- 明确了“没有等待者时的数据报”：不排队，留在内核里（kotatsu 排 64 个）。
+- 为推迟任务在 `HandleBlock` 增加 `holdBegin()` / `holdEnd()`：保活控制块但不计入
+  `hasPendingOps()`，因此句柄在推迟的停止排队时仍可正常析构。

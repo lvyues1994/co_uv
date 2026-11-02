@@ -106,6 +106,15 @@ class HandleBlock : public LoopResident {
         destroyIfDone();
     }
 
+    // 内部持有（例如排队中的推迟任务）：同样让控制块活着，但不算用户的挂起操作——
+    // 句柄照常可以析构。holdEnd() 之后控制块可能已被释放。
+    void holdBegin() noexcept { ++holds_; }
+    void holdEnd() noexcept {
+        UVCO_CONTRACT_CHECK(holds_ != 0);
+        --holds_;
+        destroyIfDone();
+    }
+
     // 结束一个操作：正在 libuv 回调里时直接内联恢复；在用户调用栈里（close()、stop()……）
     // 时经 loop 调度，避免在调用者的栈帧里恢复别的协程。
     void resumeLater(co2::coroutine_handle<> const waiter) noexcept { loop_->schedule(waiter); }
@@ -129,12 +138,13 @@ class HandleBlock : public LoopResident {
     }
 
     void destroyIfDone() noexcept {
-        if (closed_ && outstanding_ == 0 && not owned_) delete this;
+        if (closed_ && outstanding_ == 0 && holds_ == 0 && not owned_) delete this;
     }
 
     Loop* loop_;
     co2::coroutine_handle<> closeWaiter_;
     unsigned outstanding_ = 0;
+    unsigned holds_ = 0;
     bool owned_ = true; // 用户句柄（Handle<Block>）仍持有控制块
     bool closing_ = false;
     bool closed_ = false;
