@@ -25,7 +25,7 @@ struct SignalMerge {
         return true;
     }
 };
-using SignalCount = watcher::BoundedFifo<SignalEvent, 1, SignalMerge>;
+using SignalCount = watcher::ReduceOne<SignalEvent, SignalMerge>;
 struct SignalBackend {
     using Handle = uv_signal_t;
     static int init(uv_loop_t* l, Handle* h) noexcept { return uv_signal_init(l, h); }

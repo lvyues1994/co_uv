@@ -30,4 +30,14 @@ TEST_CASE("latest only overwrites and legacy counter wraps to empty") {
     count.push({2,{}}); CHECK(count.size()==1); CHECK(*count.pop().result==2);
     CHECK(count.size()==0);
 }
+TEST_CASE("policy protocol exposes bounded stats and latest overwrites equal errors") {
+    wd::LatestOnly<int> latest;
+    CHECK(latest.empty()); latest.offer({Errc::aborted,{}}); latest.offer({Errc::aborted,{}});
+    CHECK(latest.stats().buffered==1); CHECK(latest.stats().overwritten==1);
+    CHECK(latest.stats().coalesced==0); CHECK(!latest.take().result);
+    wd::BoundedFifo<int,1> fifo; fifo.offer({1,{}}); fifo.offer({2,{}});
+    CHECK(fifo.stats().dropped==1); CHECK(fifo.stats().overwritten==0);
+    wd::LegacyTimerCount count; count.offer({(std::numeric_limits<std::uint64_t>::max)(),{}});
+    count.offer({1,{}}); CHECK(count.empty()); CHECK(count.stats().buffered==0);
+}
 UVCO_TEST_MAIN

@@ -23,6 +23,7 @@ class EventPort : public ::uvco::detail::HandleBlock {
     using Info = T;
     static constexpr std::size_t bufferCapacity() noexcept { return Buffer::capacity(); }
     std::size_t queued() const noexcept { return queue_.size(); }
+    DeliveryStats stats() const noexcept { return queue_.stats(); }
     std::uint64_t overflowCount() const noexcept { return queue_.overflowCount(); }
     std::uint64_t coalescedCount() const noexcept { return queue_.coalescedCount(); }
     bool isActive() noexcept { return !closing() && uv_is_active(uvHandle()) != 0; }
@@ -40,8 +41,8 @@ class EventPort : public ::uvco::detail::HandleBlock {
             slot_.set(Errc::canceled);
             return false;
         }
-        if (queue_.size() != 0) {
-            auto record = queue_.pop();
+        if (!queue_.empty()) {
+            auto record = queue_.take();
             exception_ = std::move(record.exception);
             slot_.set(std::move(record.result));
             return false;
@@ -74,14 +75,14 @@ class EventPort : public ::uvco::detail::HandleBlock {
         // A backend may deactivate before delivering its final error. Only
         // closing invalidates delivery; next() drains buffered final statuses.
         if (closing()) return;
-        if (slot_.pending()) {
-            exception_ = std::move(exception);
-            auto waiter = slot_.complete(std::move(result));
+        queue_.offer(DeliveryRecord<T>{std::move(result), std::move(exception)});
+        if (slot_.pending() && !queue_.empty()) {
+            auto record = queue_.take();
+            exception_ = std::move(record.exception);
+            auto waiter = slot_.complete(std::move(record.result));
             if (ResumePolicy::deferred) resumeLater(waiter);
-            else waiter.resume();
-            return;
+            else waiter.resume(); // no this access afterwards
         }
-        queue_.push(DeliveryRecord<T>{std::move(result), std::move(exception)});
     }
 
     void abortPending() noexcept override {
