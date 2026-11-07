@@ -25,6 +25,8 @@ template <class T> class UVCO_NODISCARD Result;
 
 namespace detail {
 
+struct DisabledResultCopy { DisabledResultCopy() = delete; };
+
 inline Errc checkedErrc(Errc const errc) noexcept {
     UVCO_CONTRACT_CHECK(toInt(errc) < 0);
     return errc;
@@ -56,7 +58,12 @@ template <class T> class UVCO_NODISCARD Result {
 
     Result(Errc const errc) noexcept : errc_{detail::checkedErrc(errc)}, hasValue_{false} {}
 
-    Result(Result const& other) : hasValue_{other.hasValue_} {
+    using CopyArg = typename std::conditional<std::is_copy_constructible<T>::value,
+                                               Result const&, detail::DisabledResultCopy>::type;
+    using AssignArg = typename std::conditional<std::is_copy_constructible<T>::value &&
+                                                 std::is_copy_assignable<T>::value,
+                                                 Result const&, detail::DisabledResultCopy>::type;
+    Result(CopyArg other) : hasValue_{other.hasValue_} {
         if (hasValue_)
             ::new (static_cast<void*>(&value_)) T(other.value_);
         else
@@ -71,7 +78,7 @@ template <class T> class UVCO_NODISCARD Result {
             errc_ = other.errc_;
     }
 
-    Result& operator=(Result const& other) {
+    Result& operator=(AssignArg other) {
         if (this != &other) assign(other);
         return *this;
     }

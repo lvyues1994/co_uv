@@ -119,4 +119,8 @@ TEST_CASE("Result regression: throwing transition leaves a valid error") {
  try {to=from;CHECK(false);}catch(int){}
  CHECK(not to && to.error()==uvco::Errc::no_memory);
 }
+static_assert(not std::is_copy_constructible<uvco::Result<std::unique_ptr<int>>>::value,
+              "move-only Result must advertise noncopyability");
+static_assert(not std::is_copy_assignable<uvco::Result<std::unique_ptr<int>>>::value,
+              "move-only Result must advertise noncopyability");
 UVCO_TEST_MAIN
