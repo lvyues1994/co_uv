@@ -1,4 +1,5 @@
 #include <co2/co2.hpp>
+#include <memory>
 #include "test.hpp"
 #include "uvco/uvco.hpp"
 namespace {
@@ -25,4 +26,14 @@ TEST_CASE("yieldNextTurn crosses an iteration from timer idle prepare check and 
   uv_close(reinterpret_cast<uv_handle_t*>(&counter),nullptr);uv_close(reinterpret_cast<uv_handle_t*>(&driver),nullptr);loop.runUntilIdle();
  }
 }
+
+namespace {auto yielding(uvco::Loop& loop) CO2_BEG(co2::Task<uvco::Result<void>>,(loop),uvco::Result<void> r;) {
+ CO2_AWAIT_SET(r,uvco::yieldNextTurn(loop));CO2_RETURN(r);
+} CO2_END}
+TEST_CASE("yieldNextTurn pre-cancel and Loop teardown close both handles"){
+ {uvco::Loop loop;co2::stop_source stop;stop.request_stop();auto r=uvco::run(loop,yielding(loop),stop.get_token());CHECK(!r);CHECK(r.error()==uvco::Errc::canceled);}
+ auto loop=std::unique_ptr<uvco::Loop>{new uvco::Loop};auto h=co2::spawn(*loop,yielding(*loop));uv_run(loop->raw(),UV_RUN_NOWAIT);loop.reset();
+ CHECK(h.isReady());auto r=h.join();CHECK(!r);CHECK(r.error()==uvco::Errc::aborted);
+}
 UVCO_TEST_MAIN
+

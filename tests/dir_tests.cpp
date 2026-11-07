@@ -22,4 +22,23 @@ auto canceled(uvco::Loop& loop,std::string path) CO2_BEG(co2::Task<uvco::Result<
 }
 TEST_CASE("Dir reads bounded batches until empty and closes with RAII") {uvco::Loop loop;Fixture files;CHECK(uvco::run(loop,scan(loop,files.path))==70);}
 TEST_CASE("Dir open pre-cancel is Result canceled") {uvco::Loop loop;Fixture files;co2::stop_source stop;stop.request_stop();auto r=uvco::run(loop,canceled(loop,files.path),stop.get_token());CHECK(!r);CHECK(r.error()==uvco::Errc::canceled);}
+
+namespace {
+auto consume(uvco::fs::ReadDirOp op) CO2_BEG(co2::Task<uvco::Result<std::vector<uvco::fs::DirEntry>>>,(op),uvco::Result<std::vector<uvco::fs::DirEntry>> r;) {
+ CO2_AWAIT_SET(r,op);CO2_RETURN(std::move(r));
+} CO2_END
+auto leased(uvco::Loop& loop,std::string path,bool explicitClose)
+ CO2_BEG(co2::Task<int>,(loop,path,explicitClose),uvco::Result<uvco::fs::Dir> dir;
+ co2::Task<uvco::Result<std::vector<uvco::fs::DirEntry>>> next;uvco::Result<std::vector<uvco::fs::DirEntry>> entries;) {
+ CO2_AWAIT_SET(dir,uvco::fs::openDir(loop,std::move(path)));if(!dir)CO2_RETURN(-1);
+ next=consume(dir->readDir(7));if(explicitClose){if(!dir->close())CO2_RETURN(-2);}else *dir=uvco::fs::Dir{};
+ CO2_AWAIT_SET(entries,std::move(next));
+ if(explicitClose)CO2_RETURN(!entries && entries.error()==uvco::Errc::bad_descriptor ? 0 : -3);
+ CO2_RETURN(entries?static_cast<int>(entries->size()):-4);
+} CO2_END
+}
+TEST_CASE("Dir operation lease survives owner destruction but explicit close invalidates it") {
+ uvco::Loop loop;Fixture files;CHECK(uvco::run(loop,leased(loop,files.path,false))==7);CHECK(uvco::run(loop,leased(loop,files.path,true))==0);
+}
 UVCO_TEST_MAIN
+
