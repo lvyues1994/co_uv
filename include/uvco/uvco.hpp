@@ -14,3 +14,5 @@
 #include "uvco/work.hpp"
 
 #include "uvco/watcher.hpp"
+
+#include "uvco/net/connect.hpp"
