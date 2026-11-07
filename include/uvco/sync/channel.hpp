@@ -11,7 +11,7 @@
 #include <co2/coroutine_handle.hpp>
 #include <co2/env.hpp>
 #include <co2/stop_token.hpp>
-#include <uv.h>
+#include "uvco/detail/libuv.hpp"
 
 #include "uvco/core/config.hpp"
 #include "uvco/core/loop.hpp"
@@ -58,7 +58,7 @@ template <class T> class Channel {
     };
 
   public:
-    static constexpr std::size_t unbounded = std::numeric_limits<std::size_t>::max();
+    static constexpr std::size_t unbounded = (std::numeric_limits<std::size_t>::max)();
 
     explicit Channel(Loop& loop, std::size_t const capacity = unbounded) noexcept
         : senders_{loop}, receivers_{loop}, capacity_{capacity} {}

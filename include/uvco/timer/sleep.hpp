@@ -3,7 +3,7 @@
 #include <chrono>
 #include <cstdint>
 
-#include <uv.h>
+#include "uvco/detail/libuv.hpp"
 
 #include "uvco/core/config.hpp"
 #include "uvco/core/loop.hpp"

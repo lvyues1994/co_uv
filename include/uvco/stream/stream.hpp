@@ -11,7 +11,7 @@
 #include <co2/coroutine_handle.hpp>
 #include <co2/env.hpp>
 #include <co2/stop_token.hpp>
-#include <uv.h>
+#include "uvco/detail/libuv.hpp"
 
 #include "uvco/core/cancel.hpp"
 #include "uvco/core/config.hpp"
@@ -174,10 +174,10 @@ class StreamBlock : public HandleBlock {
     enum class Resume : unsigned char { inlineNow, later };
 
     static constexpr std::size_t maxBufLen() noexcept {
-        return static_cast<std::size_t>(std::numeric_limits<UvBufLen>::max()) <
-                       std::numeric_limits<std::size_t>::max()
-                   ? static_cast<std::size_t>(std::numeric_limits<UvBufLen>::max())
-                   : std::numeric_limits<std::size_t>::max();
+        return static_cast<std::size_t>((std::numeric_limits<UvBufLen>::max)()) <
+                       (std::numeric_limits<std::size_t>::max)()
+                   ? static_cast<std::size_t>((std::numeric_limits<UvBufLen>::max)())
+                   : (std::numeric_limits<std::size_t>::max)();
     }
 
     static void onAlloc(uv_handle_t* const handle, std::size_t, uv_buf_t* const buf) noexcept {
@@ -391,7 +391,7 @@ class WriteAwaiter {
         for (std::size_t i = 0; i < count; ++i) {
             if (in[i].size == 0) continue;
             if (static_cast<unsigned long long>(in[i].size) >
-                    static_cast<unsigned long long>(std::numeric_limits<UvBufLen>::max()) ||
+                    static_cast<unsigned long long>((std::numeric_limits<UvBufLen>::max)()) ||
                 n == UINT_MAX) {
                 status_ = UV_EINVAL;
                 return false;

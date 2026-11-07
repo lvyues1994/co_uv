@@ -7,7 +7,7 @@
 #include <string>
 #include <utility>
 #include <vector>
-#include <uv.h>
+#include "uvco/detail/libuv.hpp"
 #include <co2/env.hpp>
 #include "uvco/core/handle.hpp"
 #include "uvco/core/wait_slot.hpp"

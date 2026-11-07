@@ -11,7 +11,7 @@
 #include <vector>
 
 #include <co2/co2.hpp>
-#include <uv.h>
+#include "uvco/detail/libuv.hpp"
 
 #include "uvco/core/config.hpp"
 #include "uvco/core/error.hpp"

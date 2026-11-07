@@ -10,7 +10,7 @@
 
 #include <co2/coroutine_handle.hpp>
 #include <co2/scheduler.hpp>
-#include <uv.h>
+#include "uvco/detail/libuv.hpp"
 
 #include "uvco/core/config.hpp"
 

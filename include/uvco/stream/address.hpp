@@ -4,7 +4,7 @@
 #include <cstring>
 #include <string>
 
-#include <uv.h>
+#include "uvco/detail/libuv.hpp"
 
 #include "uvco/core/error.hpp"
 #include "uvco/core/result.hpp"

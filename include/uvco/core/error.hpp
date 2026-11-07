@@ -4,7 +4,7 @@
 #include <system_error>
 #include <type_traits>
 
-#include <uv.h>
+#include "uvco/detail/libuv.hpp"
 
 // libuv 错误码：负数 int（UV_E*）。uvco 用 Errc 给它一个强类型名字，并通过
 // uv_category() 接入 std::error_code。

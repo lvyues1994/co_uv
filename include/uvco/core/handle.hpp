@@ -3,7 +3,7 @@
 #include <utility>
 
 #include <co2/coroutine_handle.hpp>
-#include <uv.h>
+#include "uvco/detail/libuv.hpp"
 
 #include "uvco/core/config.hpp"
 #include "uvco/core/loop.hpp"

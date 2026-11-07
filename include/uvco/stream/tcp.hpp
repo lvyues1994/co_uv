@@ -3,7 +3,7 @@
 #include <chrono>
 #include <utility>
 
-#include <uv.h>
+#include "uvco/detail/libuv.hpp"
 
 #include "uvco/core/config.hpp"
 #include "uvco/core/error.hpp"

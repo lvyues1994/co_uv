@@ -8,7 +8,7 @@
 #include <co2/coroutine_handle.hpp>
 #include <co2/env.hpp>
 #include <co2/stop_token.hpp>
-#include <uv.h>
+#include "uvco/detail/libuv.hpp"
 
 #include "uvco/core/config.hpp"
 #include "uvco/core/loop.hpp"

@@ -9,7 +9,7 @@
 #include <type_traits>
 #include <utility>
 
-#include <uv.h>
+#include "uvco/detail/libuv.hpp"
 
 #include <co2/co2.hpp>
 
@@ -134,10 +134,10 @@ class UdpBlock final : public HandleBlock {
 
     static constexpr std::size_t maxBufLen() noexcept {
         using Len = decltype(uv_buf_t{}.len);
-        return static_cast<std::size_t>(std::numeric_limits<Len>::max()) <
-                       std::numeric_limits<std::size_t>::max()
-                   ? static_cast<std::size_t>(std::numeric_limits<Len>::max())
-                   : std::numeric_limits<std::size_t>::max();
+        return static_cast<std::size_t>((std::numeric_limits<Len>::max)()) <
+                       (std::numeric_limits<std::size_t>::max)()
+                   ? static_cast<std::size_t>((std::numeric_limits<Len>::max)())
+                   : (std::numeric_limits<std::size_t>::max)();
     }
 
     static void onAlloc(uv_handle_t* const handle, std::size_t, uv_buf_t* const buf) noexcept {
