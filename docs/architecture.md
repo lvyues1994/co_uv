@@ -352,7 +352,7 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
   `next()->Result<FsEventInfo{std::string filename,int events}>`；events 为 UV_RENAME/UV_CHANGE 位。
 - `FsPoll::start(loop,path,interval=1s)->Result<FsPoll>`；成员 start(path,interval)、setInterval、interval。
   `next()->Result<FsPollChange{uv_stat_t prev,curr}>`；负状态单独作为 Result 错误，不读取无效快照。
-- 共用 WatchBlock/WatchQueue + HandleBlock/HandleRef/WaitSlot/CancelHook，不共用 FsOp（native handle 而非 req）。
+- 共用 detail/watcher 的 EventPort/BoundedFifo + typed Backend，以及 HandleBlock/HandleRef/WaitSlot/CancelHook；fs/detail/watch.hpp 仅保留兼容别名。不共用 FsOp（native handle 而非 req）。
   固定 32 条 FIFO，相邻同名 event 合并位、相同错误合并；poll 成功快照不合并。满时丢最旧，overflow/coalesced
   饱和计数可观测；stop 清空缓存保留计数，成功 restart 换新块并归零。错误/投影异常同样占队列容量，可能被丢弃。
 - next 单等待者（含 done 未 take 的预约）；预取消不取缓存，运行中取消不停止监控；第一个 loop 完成赢迟取消。
@@ -551,6 +551,19 @@ Windows 先确保 CRT duplicate >2，避免进入 native stdio HANDLE 再复制�
 显式 mode 更改在 read 预约期间返回 busy；beginClose 与 loopClosing 都在关闭前尽力 Normal，
 不使用全局 reset；原生 setMode 的阻塞/失败限制仍存在。精确 ModeGuard/独占租约留给后续子步骤。
 
+### Resolver / HE / process-group 生命周期
+
+- ResolverBlock 复用 HandleBlock/HandleRef，producer 由自身 frame/owned key 持有；订阅者 intrusive node 在 awaiter 中，
+  从构造保活，取消只在 loop 上 unlink；先完成再排队的取消不覆盖已交付结果。
+- 每个 resolver 的 native async 平时 unref，在 flight 存在时 ref；logical stopping 先中止订阅者/取消 producer，
+  等最后 flight 的 deferred collector 完成才 close native handle。保持原有 ~Loop 禁止外部 KeepAlive 的契约。
+- 缓存成功结果为 immutable shared vector；精确 key/epoch，有界 LRU；缓存分配失败不使成功查询失败，
+  bad_alloc 映射 no_memory，其他 backend 异常在 collector drain 后从 await_resume 重抛。
+- HE 专用 first-success coordinator 分离 DNS/候选策略/有界 worker；所有 frame 创建好后才启动，
+  guarded workers 捕获异常、取消并排空后重抛；父 CancelHook 由 state RAII 兜底 disarm。
+- Process privateGroup 只增加 spawn 身份能力，不改变默认 reap；waitid(WNOHANG|WNOWAIT) 检查子身份后 kill(-pid)，
+  loop-thread/sole-reaper 保证期间不会由 libuv 回收复用 PID；capture 也走同一检查。
+
 ## 8. 待定问题
 
 - uvco core 依赖 co2 的若干 `detail` 接口：`TaskAccess`（启动 Task / 取结果）、`stopTokenOf`
@@ -585,17 +598,20 @@ Windows 先确保 CRT duplicate >2，避免进入 native stdio HANDLE 再复制�
   Windows/macOS、多配置生成器与 CMake 3.14 实机验证尚待补充；非 imported 源目标复杂 generator expression
   会明确拒绝，推荐使用依赖的 installed/imported target。
 
-- DNS 暂无缓存、Happy Eyeballs、resolver 注入；Work 不强制中断，取消不撤销副作用。
+- DNS 已有 opt-in LRU/single-flight 与 HE 核心子集；非权威 TTL、不做负缓存/完整 RFC6724/NAT64。Work 不强制中断，取消不撤销副作用。
 - P2 已增加 capture/BufferedReader、目录迭代、UDP multicast 选项、listener 门面与 yieldNextTurn；
   FsEvent/FsPoll/Signal/phase/TTY 已实现；待扩展通用 fd poll 与精确终端 ModeGuard。未更改 Process reap-on-destruct 或可能阻塞 Loop 析构的策略。
 - capture 不保留错误时部分输出，无信号升级/跨平台 process-tree 后端；POSIX leader 已回收后
   不再寻址旧 PGID。BufferedReader cap 不是硬 allocator 限额；Dir close 是同步清理。
 
-### Block 2 后续（未实现，不与已交付混淆）
+### Block 2 剩余边界
 
-- Resolver 缓存默认关闭；owned immutable 结果、有界 single-flight、订阅者取消、Loop-first producer drain 仍待实现。
-  注意原设计提及 KeepAlive，但现有 ~Loop 禁止存活 KeepAlive；不能直接组合后宣称支持 Loop-first，须选择 native request/resident 保活或专门设计内部 drain lease。
-- HE 核心子集与 POSIX signalGroup 按批准顺序继续；Windows Job、完整 RFC6724/NAT64、精确终端 snapshot/租约另行里程碑。
+- Resolver 现在用 resident/native async ref，而非外部 KeepAlive；最后订阅者离开立即取消，无 cache-fill grace。
+  close/~Loop 必须等待 producer 最终完成：不可取消的 NSS/注入后端可能阻塞 teardown，不承诺硬 deadline。
+- HE 为 RFC8305 核心子集，族内 policy hook 不等于完整 RFC6724；固定最多 64 个 worker，task/slot 为每次连接分配。
+  共享 DNS 向 owned 候选数组复制，优先保证独立排序和生命周期，不为少量分配加入复杂 arena。
+- POSIX signalGroup 是 best-effort session/group，不是后代 containment；leader 已退出就拒绝旧 PGID。
+  缺少 WNOWAIT 返回 ENOTSUP；不支持外部 reaper。Windows Job、完整 RFC6724/NAT64、精确终端 snapshot/租约另行里程碑。
 - Signal 外部 disposition 共存无法保证；callback count 不是 POSIX 信号发送数。
 - phase ref 不等于 wakeup；Idle 可能空转；无 generator sugar（保留 next 循环），避免未验证的帧取消/销毁语义。
 - Windows/macOS 原生 Signal/TTY/phase 尚未本地验证，CI 仍为非阻塞实验 job。
@@ -895,10 +911,26 @@ Normal 恢复同时覆盖 owner close 与 ~Loop；精确 snapshot guard 未实�
 Hook onIdle 初始停止（需要 start），onPrepare/onCheck 自动启动；这是避免无意忙转的保守具体化。
 当前无可派发独立 reviewer 工具；已做本地生命周期/所有权审查，但不能冒称独立代码 review 已完成。
 
-### Block 2 已交付部分最终验证
+### Block 2 前半段历史验证（8238d63）
 
 在新工作目录中，g++ Debug / clang++ Debug / clang++ ASan+UBSan / clang++ TSan 各通过
 **54 个 CTest 目标 × 3 次**；其中 14 个 watcher/迁移/Signal/phase/TTY/故障目标各再重复 **20 次**。
 ASan 开启 leak 检测，UBSan/TSan halt_on_error；无 sanitizer 报告。含全部独立头、安装/搬迁消费者与两 TU ODR 检查。
 原测试源文件保持不变，仅新增测试并登记 CMake。CI 无需调整，现有 matrix 自动构建新目标；未 push。
-这是 watcher/Signal/phase/TTY 的验证，不代表尚未实现的 Resolver/HE/group 已交付。
+这是 watcher/Signal/phase/TTY 的历史 checkpoint；后续 Resolver/HE/group 与自查结果见下。
+
+
+### Block 2 后半段与全量自查
+
+- 依次交付 bounded opt-in Resolver → HE core subset → POSIX privateGroup/signalGroup，未更改五项批准默认值。
+- 保守偏差：native resident ref 代替外部 KeepAlive；最后订阅者立即停止 producer（不加 1s grace）；
+  HE policy 仅族内 hook，不虚报系统 RFC6724；Windows Job、严格树 containment、精确 TTY guard 延后。
+- 对 461b27d..HEAD 做本地 fresh-eyes 自查（不是独立 reviewer）：发现并用 RED→GREEN 回归修复
+  capture stale-PGID 窗口、HE setup 异常留下 CancelHook、HE loser drain 期间 Loop-first 返回孤儿成功、
+  Resolver 用户 callback 重入 close/invalidate 后继续启动 producer/重发旧缓存。
+- 架构判断：watcher 只统一后端/交付/生命周期；stream/UDP 的背压与单次 req、DNS single-flight、HE 比赛不强塞 EventPort。
+  没有新增大而全 Watcher 虚接口或 hook std::function；更多复用应由真实重复驱动。
+- 全量测试与平台边界以 docs/block2-review.md 的最终记录为准；本地 Linux 验证不代表 Windows/macOS/QNX 已验证。
+
+最终后半段 + 全量自查源码已验证：g++、clang++、ASan/UBSan、TSan 各 59 CTest targets ×3，
+再各 18 个定向 targets ×20，全部通过；包含安装/消费者/headers/两 TU。日志为 build/block2-cont/verified-*.log。

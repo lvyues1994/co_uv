@@ -7,7 +7,7 @@
 设计见 [docs/architecture.md](docs/architecture.md)。
 
 当前进度：v0.1 第 1 步 **core**（`Result<T>`、`Loop`、`run()`、`detail::ReqAwaiter`）、第 2 步 **timer**（`sleep()`、`Timer`、通用句柄生命周期）、第 3 步 **sync**（`Event`、`Mutex`、`Channel<T>`、`whenAny`、`timeout`）、第 4 步 **stream**（`Tcp`、`Pipe`：拉模式 read、write、shutdown、listen/accept、connect）、第 5 步 **udp**（`Udp`：拉模式 recv 返回 `Datagram`、send、connect）、第 6 步 **fs**（`File`、`open`/`stat`/`unlink`/`mkdir`/`rename`/`mkstemp`/`scandir`/`copyfile`/`sendfile` 等、`readFile`/`writeFile`，迟到取消不泄漏 fd）。
-v0.1 范围（文档 §5）已全部实现；另已增加 **process**（`spawn`、可取消 `wait`、`kill`、stdio Pipe）；现已增加 **dns**（`getaddrinfo/getnameinfo`）、**work**（`queueWork`）与 Result-aware `whenAllResults`；另已增加 **fs watchers**（`FsEvent` / `FsPoll`）；signal/tty/通用 fd poll 留待后续。
+v0.1 范围（文档 §5）已全部实现；另已增加 **process**（`spawn`、可取消 `wait`、`kill`、stdio Pipe）；现已增加 **dns**（`getaddrinfo/getnameinfo`）、**work**（`queueWork`）与 Result-aware `whenAllResults`；另已增加 **fs watchers**（`FsEvent` / `FsPoll`）；**Signal / phase hooks / TTY** 已实现；通用 fd poll 留待后续。
 
 ## 要求
 
@@ -245,7 +245,7 @@ FsEvent 不承诺被监控目标自身 rename/delete 后自动跟随或重新订
 FsPoll 按路径持续 stat，缺失后可恢复；stop 不强制中断已提交的 stat，close/~Loop 可能等待底层 I/O。
 active watcher 会保持原生 loop 存活，调用 drain 前须 stop/close（run 仍只驱动到根任务完成）。
 
-本次 Linux 验证：g++、clang++、ASan/UBSan、TSan 四配置各 **45/45 CTest，完整重复 3 轮**；
+fs watcher 首次交付时的历史 Linux 验证：g++、clang++、ASan/UBSan、TSan 四配置各 **45/45 CTest，完整重复 3 轮**；
 新增 5 组 watcher 测试另各重复 20 轮，含 install/consumer/两 TU 检查。日志在 `build/review/fs-watchers/`。
 macOS/Windows CI 仍为非阻塞，QNX 尚无目标机验证；CI 不需改动，CMake 自动纳入新增测试。
 
@@ -330,4 +330,57 @@ Unix reopened native fd 与辅助 duplicate 分别跟踪；fallback dup 的文�
 Unix PTY 覆盖双向 I/O、模式、取消/close/Loop-first、失败所有权与 fd leak；Windows 实机尚未验证。
 
 Block 2 进度：watcher core / FsEvent→FsPoll→Timer / Signal / phase / TTY 已交付；
-DNS cache、Happy Eyeballs、POSIX signalGroup 尚未实现，Windows Job 与精确 ModeGuard 后续单独验证。
+DNS cache（默认关闭）、Happy Eyeballs 核心子集与 POSIX signalGroup 现已完成。Windows Job 与精确 ModeGuard 后续单独验证。
+
+
+### DNS resolver 与 Happy Eyeballs
+
+```cpp
+uvco::DnsCacheOptions cache; // enabled=false；默认不缓存，仍合并在途同 key 请求
+cache.enabled = true;       // 应用主动选择；maxAge 是本地年龄，不是 DNS TTL
+uvco::DnsResolver resolver{loop, cache};
+CO2_AWAIT_SET(addresses, resolver.resolve("127.0.0.1", "80")); // Result<AddressList>
+// AddressList = shared_ptr<vector<SocketAddress> const>；可越过 resolver 生命周期持有
+CO2_AWAIT_SET(tcp, uvco::connect(loop, resolver, "example.test", 443)); // Result<Tcp>
+```
+
+缓存按 host/service + hints 标量 + invalidation 代次精确匹配，成功结果 LRU，默认上限
+256 条 / 估算 4 MiB、32 个在途 producer / 256 个订阅者；不缓存失败。
+`invalidate()` 切断旧代次（旧订阅仍可完成，但不回写新缓存）；单个 stop_token 只解除该订阅，最后一个订阅离开即请求取消 producer。
+`close()` / ~Loop 先 aborted 订阅者，再保证 producer drain；在途 producer 用 resident/native async ref
+保活，**不占外部 Loop::KeepAlive**。系统 NSS 或不配合取消的注入 producer 仍可能延迟关闭；
+注入 backend 必须最终完成/响应 teardown。缓存字节预算不包含调用者持有的共享结果/allocator 开销。
+
+`ConnectOptions`：resolutionDelay=50ms、attemptDelay=250ms、minimumDelay=100ms、
+maxConcurrent=4（1..64）、perAttemptTimeout=5s、overallTimeout=30s；minimumDelay 不小于 10ms，
+attemptDelay 不小于 minimumDelay 且不大于 2s。
+数字地址绕过 DNS；双族并行解析，族间交错，普通连接失败继续比赛；首个成功取消并 drain 连接落败者，
+但不等待独立 DNS producer。全败取最后发起候选的错误；异常 drain 后重抛。
+`addressPolicy` 只在族内排序；owned `connector` / `clock` 供确定性测试和高级策略注入。
+connector/clock/policy 也遵循 loop-thread 契约；connector 应使用可由 uvco teardown 的 awaiter，
+不能留下脱离 loop 生命周期的外部任务。
+这是 RFC8305 **核心子集**，不宣称完整 RFC6724、NAT64 合成或完整 RFC8305 合规。
+
+### POSIX process group（best effort，不冒充严格 kill-tree）
+
+```cpp
+uvco::ProcessOptions options;
+options.file = "worker";
+options.privateGroup = true;               // POSIX 新 session/group；仍由 Process 回收
+// 检查 spawn 的 Result 后：
+auto sent = process.signalGroup(SIGTERM);   // Result<void>；0 只探测，负数非法
+```
+
+只有 privateGroup 或原有 detached 建立的组可使用；普通 Process 返回 ENOTSUP。
+`waitid(... WNOWAIT)` 非回收检查后才能寻址 PGID；leader 已退出/被回收返回 ESRCH，
+包括 libuv 已回收但 exit callback 尚未交付的窗口。要求 loop 线程、libuv 唯一 reaper；
+不支持外部 waitpid / SIGCHLD 所有权竞争，不使用 kill(pid,0) 作身份保证。
+`CaptureCancel::killGroup` 共用此安全路径。默认 reap-on-destruct 不变；不自动升级信号，
+leader 退出后不保留“稍后再 SIGKILL 同一 PGID”的权限。后代可 setsid/setpgid 逃逸；
+缺少 WNOWAIT 的平台及 Windows Job 未实现路径返回 ENOTSUP；Windows capture killGroup 沿用 ENOSYS。
+
+Block 2 自查范围、已修复问题和支持边界见 [docs/block2-review.md](docs/block2-review.md)。
+
+本轮最终 Linux 验证：g++ / clang++ / ASan+UBSan / TSan 各 **59 个 CTest ×3**，
+另各 **18 个 watcher/fs/DNS/HE/group 定向目标 ×20**，全部通过（含 install/consumer/header/两 TU）。
+日志 `build/block2-cont/verified-*.log`；CI 未变更，本地结果不等于远程平台已验证。

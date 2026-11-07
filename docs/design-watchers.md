@@ -2,7 +2,7 @@
 
 状态：**用户已批准，分阶段实现中**。五项默认已确认：hook 默认 unref、拒绝 SIGPIPE、
 DNS cache 默认关闭、HE 核心子集、kill-tree 先 POSIX group 后 Windows Job。
-当前已实现统一内核、FsEvent/FsPoll/Timer 无行为变更迁移及 Signal、phase hooks/高级适配、TTY duplicate 流；DNS cache/HE/POSIX group 尚未实现。下文 API 仍需结合各阶段实际交付状态阅读。
+统一内核、FsEvent/FsPoll/Timer 迁移、Signal、phase、TTY、DNS cache、HE 核心子集与 POSIX signalGroup 现已交付。下文为批准设计；实际 API/保守偏差以 README、architecture §7/§8/§9 为准。
 基线：`main@48d201f`；工作目录 `/home/lvyues/code/uvcoro/co_uv`。
 核对：2026-11-07（北京时间）。所有 API 片段均为拟议接口。
 
@@ -207,7 +207,7 @@ CO2_AWAIT_SET(tcp, uvco::connect(loop, resolver, "example.com", 443, connectOpti
 - 命中交付 immutable owned AddressList（共享结果，避免每个订阅者复制 vector）；缓存命中本身不重新分配地址列表，
   但不承诺 Task 帧零分配。同 key single-flight；producer/in-flight/subscriber 数量设上限，溢出返回 busy，不排无限队列。
 - 取消一个订阅者不取消别人。最后订阅者撤销后 producer 独立持有 host/service/结果状态，短暂保留回填机会（建议 1s），
-  再请求 uv_cancel；运行中的 getaddrinfo 不能强停。producer 用 LoopResident/KeepAlive 追踪，绝不借用已经返回的调用帧。
+  再请求 uv_cancel；运行中的 getaddrinfo 不能强停。实际 producer 用 HandleBlock resident/native async ref 追踪（不用外部 KeepAlive），绝不借用已经返回的调用帧。
   resolver close/~Loop 取消订阅并 drain producer，可能等待底层 NSS。原始 DNS ReqAwaiter 的取消线性化不改变。
 
 ### Happy Eyeballs（RFC 8305 的核心算法；不虚报完整符合）
@@ -291,3 +291,14 @@ phase 测试以受控 I/O 驱动，只检查 idle→prepare→poll→check 的�
   [Windows TTY](https://github.com/libuv/libuv/blob/v1.48.0/src/win/tty.c)、
   [Windows spawn/global job](https://github.com/libuv/libuv/blob/v1.48.0/src/win/process.c)。
   stable TTY 文档包含更新版本 mode，不据此提高本库 1.40 下限或承诺未验证功能。
+
+
+## 10. 实际交付说明
+
+Resolver 实际为 loop-bound owner，close awaitable 先 aborted 订阅、最后 flight 完成才 close native。
+最后订阅者离开立即 stop producer，无延迟 grace；保留 ~Loop 外部 KeepAlive 契约。
+缓存默认关闭；成功 immutable shared vector、本地 maxAge、有界 LRU 与单飞，不缓存失败。
+HE 采用独立 coordinator + guarded bounded workers，族内排序 hook + 族间 interleave；不是 whenAny 的误用。
+POSIX privateGroup/signalGroup 依赖 WNOWAIT 身份检查和唯一 reaper，不承诺 leader 退出后仍能安全升级信号。
+Windows Job/精确 TTY snapshot guard/完整 RFC6724/NAT64 仍未交付。
+自查和最终验证见 [block2-review.md](block2-review.md)。
