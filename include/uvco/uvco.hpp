@@ -8,3 +8,5 @@
 #include "uvco/udp.hpp"
 
 #include "uvco/process.hpp"
+
+#include "uvco/dns.hpp"
