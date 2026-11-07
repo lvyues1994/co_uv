@@ -82,7 +82,22 @@ class ProcessBlock final : public HandleBlock {
         return result;
     }
     bool exited() const noexcept { return exited_; }
+    void abandon() noexcept {
+        UVCO_CONTRACT_CHECK(not hasPendingOps());
+        if (orphaned() || closing() || exited_) { static_cast<void>(release({})); return; }
+        UVCO_CONTRACT_CHECK(loop().isLoopThread());
+        reapOnly_ = true;
+        relinquishOwnership(); // still resident and ref'ed until onExit closes it
+    }
   private:
+    void loopClosing() noexcept override { beginClose(); }
+    void beginClose() noexcept override {
+        if (closing()) return;
+        teardown_ = true;
+        finish(Errc::aborted, false);
+        // No implicit kill and no zombie: teardown may block until child exits.
+        if (exited_) closeInternally();
+    }
     uv_handle_t* uvHandle() noexcept override { return reinterpret_cast<uv_handle_t*>(&handle); }
     void abortPending() noexcept override { finish(Errc::aborted, false); }
     void finish(Result<ExitStatus> result, bool inlineResume) noexcept {
@@ -97,8 +112,11 @@ class ProcessBlock final : public HandleBlock {
         auto& self = fromData<ProcessBlock>(h->data);
         self.exit_ = ExitStatus{status, signal};
         self.exited_ = true;
+        if (self.reapOnly_ || self.teardown_) { self.closeInternally(); return; }
         self.finish(self.exit_, true); // no self access after resume
     }
+    bool reapOnly_ = false;
+    bool teardown_ = false;
     bool active_ = false;
     bool exited_ = false;
     bool waiting_ = false;
@@ -141,6 +159,19 @@ class Process : public detail::Handle<detail::ProcessBlock> {
     using Base = detail::Handle<detail::ProcessBlock>;
   public:
     Process() noexcept = default;
+    Process(Process&&) noexcept = default;
+    Process& operator=(Process&& other) noexcept {
+        if(this != &other) { abandon(); Base::operator=(std::move(other)); }
+        return *this;
+    }
+    ~Process() { abandon(); }
+    // Stop monitoring explicitly; caller is responsible for eventual OS reaping.
+    uv_pid_t detach() {
+        auto id=pid();
+        block().closeInternally();
+        {auto c=close();}
+        return id;
+    }
     // Destruction/close never sends a signal. Pending wait must finish or be
     // explicitly aborted with close() before destruction (same as other handles).
     detail::ProcessWaitAwaiter wait() { return detail::ProcessWaitAwaiter{block()}; }
@@ -152,6 +183,7 @@ class Process : public detail::Handle<detail::ProcessBlock> {
     }
     uv_pid_t pid() const { return block().handle.pid; }
   private:
+    void abandon() noexcept { auto* b=takeBlock(); if(b) b->abandon(); }
     explicit Process(detail::ProcessBlock* b) : Base{b} {}
     friend Result<Process> spawn(Loop&, ProcessOptions);
 };

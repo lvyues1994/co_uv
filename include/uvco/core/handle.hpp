@@ -67,7 +67,7 @@ class HandleBlock : public LoopResident {
             return false;
         }
         closeWaiter_ = closeWaiter;
-        closeInternally();
+        beginClose();
         return static_cast<bool>(closeWaiter);
     }
 
@@ -90,8 +90,17 @@ class HandleBlock : public LoopResident {
         if (loop_ != nullptr) unlinkFrom(*loop_);
     }
 
+    bool ownsHandle(uv_handle_t* h) noexcept override { return h==uvHandle(); }
     virtual uv_handle_t* uvHandle() noexcept = 0;
     virtual void abortPending() noexcept = 0;
+    virtual void beginClose() noexcept { closeInternally(); }
+
+    // A self-reaping handle may outlive its public owner without closing yet.
+    void relinquishOwnership() noexcept {
+        UVCO_CONTRACT_CHECK(owned_);
+        owned_ = false;
+        destroyIfDone();
+    }
 
     // 派生类在 uv_xxx_init 之后调用：handle->data 指向控制块（以 HandleBlock* 存储）。
     void bindHandle() noexcept { uvHandle()->data = static_cast<HandleBlock*>(this); }
@@ -229,6 +238,8 @@ template <class Block> class Handle {
   protected:
     Handle() noexcept : block_{nullptr} {}
     explicit Handle(Block* const block) noexcept : block_{block} {}
+
+    Block* takeBlock() noexcept { return std::exchange(block_, nullptr); }
 
     // 在 loop 线程上取得控制块；空句柄上操作是契约违规。
     Block& block() const noexcept {

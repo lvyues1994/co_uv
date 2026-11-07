@@ -66,6 +66,7 @@ class LoopResident {
 
     virtual void loopClosing() noexcept = 0;
     virtual void loopGone() noexcept = 0;
+    virtual bool ownsHandle(uv_handle_t*) noexcept { return false; }
 
     // loop 线程：登记 / 注销（定义在 Loop 之后）。
     void linkTo(Loop& loop) noexcept;
@@ -331,6 +332,8 @@ class Loop final : public co2::Scheduler {
         if (handle == reinterpret_cast<uv_handle_t*>(&self->async_) ||
             handle == reinterpret_cast<uv_handle_t*>(&self->idle_) || uv_is_closing(handle) != 0)
             return;
+        for (auto* resident=self->residents_; resident; resident=resident->residentNext_)
+            if (resident->ownsHandle(handle)) return;
         uv_close(handle, [](uv_handle_t* const closed) { closed->data = nullptr; });
     }
 

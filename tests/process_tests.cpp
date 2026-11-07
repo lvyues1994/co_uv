@@ -1,4 +1,5 @@
 #include <csignal>
+#include <cerrno>
 #include <chrono>
 #include <thread>
 #include <memory>
@@ -103,25 +104,24 @@ TEST_CASE("process explicit close aborts wait without killing") {
  auto pid=p->pid(); auto h=co2::spawn(loop,waitFor(*p));
  uv_run(loop.raw(),UV_RUN_NOWAIT);
  { auto closing=p->close(); }
+ CHECK(::kill(pid,0)==0); CHECK(::kill(pid,SIGKILL)==0);
  uvco::drain(loop); CHECK(h.isReady());
  auto r=h.join(); CHECK(not r && r.error()==uvco::Errc::aborted);
- CHECK(::kill(pid,0)==0); CHECK(::kill(pid,SIGKILL)==0);
- int status=0; CHECK(::waitpid(pid,&status,0)==pid);
+ int status=0; CHECK(::waitpid(pid,&status,WNOHANG)==-1 && errno==ECHILD);
 }
-TEST_CASE("process loop destruction aborts wait and orphan can destruct") {
+TEST_CASE("process loop destruction aborts wait but reaps child before returning") {
  auto loop=std::unique_ptr<uvco::Loop>{new uvco::Loop};
- auto p=uvco::spawn(*loop,sleeper()); CHECK(p); auto pid=p->pid();
- auto h=co2::spawn(*loop,waitFor(*p)); uv_run(loop->raw(),UV_RUN_NOWAIT);
- loop.reset(); CHECK(h.isReady()); auto r=h.join();
+ auto o=sleeper();o.args={"0.03"};auto p=uvco::spawn(*loop,o);CHECK(p);auto pid=p->pid();
+ auto h=co2::spawn(*loop,waitFor(*p));uv_run(loop->raw(),UV_RUN_NOWAIT);
+ loop.reset();CHECK(h.isReady());auto r=h.join();
  CHECK(not r && r.error()==uvco::Errc::aborted);
- CHECK(::kill(pid,0)==0); CHECK(::kill(pid,SIGKILL)==0);
- int status=0; CHECK(::waitpid(pid,&status,0)==pid);
+ int status=0;CHECK(::waitpid(pid,&status,WNOHANG)==-1 && errno==ECHILD);
 }
-TEST_CASE("process destructor does not kill running child") {
+TEST_CASE("process destructor hands running child to reap-only block") {
  uvco::Loop loop; uv_pid_t pid=0;
- { auto p=uvco::spawn(loop,sleeper()); CHECK(p); pid=p->pid(); }
- uvco::drain(loop); CHECK(::kill(pid,0)==0); CHECK(::kill(pid,SIGKILL)==0);
- int status=0; CHECK(::waitpid(pid,&status,0)==pid);
+ {auto o=sleeper();o.args={"0.03"};auto p=uvco::spawn(loop,o);CHECK(p);pid=p->pid();}
+ CHECK(::kill(pid,0)==0);uvco::drain(loop);
+ int status=0;CHECK(::waitpid(pid,&status,WNOHANG)==-1 && errno==ECHILD);
 }
 TEST_CASE("process errors and fd cleanup") {
  auto base=fds();
@@ -178,5 +178,11 @@ TEST_CASE("regression: unstarted wait survives close") {
  auto p=uvco::spawn(loop,o);CHECK(p);auto op=p->wait();
  {auto c=p->close();}uvco::drain(loop);
  auto r=uvco::run(loop,delayedWait(op));CHECK(not r && r.error()==uvco::Errc::aborted);
+}
+TEST_CASE("process detach transfers responsibility explicitly") {
+ uvco::Loop loop;auto p=uvco::spawn(loop,sleeper());CHECK(p);
+ auto pid=p->detach();CHECK(not p->isOpen());uvco::drain(loop);
+ CHECK(::kill(pid,0)==0);CHECK(::kill(pid,SIGKILL)==0);
+ int status=0;CHECK(::waitpid(pid,&status,0)==pid);
 }
 UVCO_TEST_MAIN
