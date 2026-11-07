@@ -1,5 +1,7 @@
 #pragma once
 
+#include "uvco/core/co2_compat.hpp"
+
 #include <cstdint>
 #include <climits>
 #include <string>
@@ -136,7 +138,7 @@ class ProcessWaitAwaiter {
     bool await_ready() const noexcept { return false; }
     template<class Promise> bool await_suspend(co2::coroutine_handle<Promise> waiter) {
         started_ = true;
-        token_ = co2::detail::stopTokenOf(waiter);
+        token_ = ::uvco::detail::co2compat::stopTokenOf(waiter);
         bool const pending = block_->begin(waiter, token_.stop_requested());
         if (pending) hook_.arm(block_->loop(), std::move(token_), &cancel, block_);
         return pending;

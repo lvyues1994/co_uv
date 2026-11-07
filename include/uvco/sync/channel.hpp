@@ -1,5 +1,7 @@
 #pragma once
 
+#include "uvco/core/co2_compat.hpp"
+
 #include <cstddef>
 #include <deque>
 #include <limits>
@@ -101,7 +103,7 @@ template <class T> class Channel {
         template <class Promise> bool await_suspend(co2::coroutine_handle<Promise> const waiting) {
             Channel& channel = *channel_;
             channel.senders_.checkThread();
-            co2::stop_token token = co2::detail::stopTokenOf(waiting);
+            co2::stop_token token = ::uvco::detail::co2compat::stopTokenOf(waiting);
             if (token.stop_requested()) {
                 node_.status = UV_ECANCELED;
                 return false;
@@ -138,7 +140,7 @@ template <class T> class Channel {
         template <class Promise> bool await_suspend(co2::coroutine_handle<Promise> const waiting) {
             Channel& channel = *channel_;
             channel.receivers_.checkThread();
-            co2::stop_token token = co2::detail::stopTokenOf(waiting);
+            co2::stop_token token = ::uvco::detail::co2compat::stopTokenOf(waiting);
             if (token.stop_requested()) {
                 node_.result = Errc::canceled;
                 return false;

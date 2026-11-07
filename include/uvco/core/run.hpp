@@ -1,5 +1,7 @@
 #pragma once
 
+#include "uvco/core/co2_compat.hpp"
+
 #include <type_traits>
 #include <utility>
 
@@ -32,19 +34,19 @@ namespace detail {
 
 // Task 的续体：一个手写、不占堆的协程帧（与 co2::syncWait 的完成帧同一手法）。
 struct RunCompletion {
-    co2::detail::FrameHeader header;
+    ::uvco::detail::co2compat::FrameHeader header;
     Loop* loop;
     bool finished;
 
     explicit RunCompletion(Loop& loop_) noexcept
-        : header{&co2::detail::noopDestroy, &step, false, false}, loop{&loop_},
+        : header{&::uvco::detail::co2compat::noopDestroy, &step, false, false}, loop{&loop_},
           finished{false} {}
 
     co2::coroutine_handle<> handle() noexcept {
         return co2::coroutine_handle<>::from_address(&header);
     }
 
-    static co2::detail::FrameHeader* step(co2::detail::FrameHeader* const header) {
+    static ::uvco::detail::co2compat::FrameHeader* step(::uvco::detail::co2compat::FrameHeader* const header) {
         static_assert(std::is_standard_layout<RunCompletion>::value,
                       "the completion frame must stay standard-layout");
         auto* const self = reinterpret_cast<RunCompletion*>(header);
@@ -68,9 +70,9 @@ template <class T> T run(Loop& loop, co2::Task<T> task, co2::stop_token token = 
     UVCO_CONTRACT_CHECK(loop.isLoopThread());
     UVCO_CONTRACT_CHECK(not loop.isRunning());
     detail::RunCompletion completion{loop};
-    co2::detail::TaskAccess::start(task, completion.handle(), std::move(token));
+    ::uvco::detail::co2compat::TaskAccess::start(task, completion.handle(), std::move(token));
     if (not completion.finished) loop.runUntilStopped(completion.finished);
-    return co2::detail::TaskAccess::takeResult(task);
+    return ::uvco::detail::co2compat::TaskAccess::takeResult(task);
 }
 
 inline void drain(Loop& loop) { loop.runUntilIdle(); }

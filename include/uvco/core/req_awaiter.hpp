@@ -1,5 +1,7 @@
 #pragma once
 
+#include "uvco/core/co2_compat.hpp"
+
 #include <type_traits>
 #include <utility>
 
@@ -98,7 +100,7 @@ template <class Derived, class Req, class T> class ReqAwaiter {
     bool await_suspend(co2::coroutine_handle<Promise> const waiting) {
         UVCO_CONTRACT_CHECK(state_ == State::idle);
         UVCO_CONTRACT_CHECK(loop_->isLoopThread());
-        co2::stop_token token = co2::detail::stopTokenOf(waiting);
+        co2::stop_token token = ::uvco::detail::co2compat::stopTokenOf(waiting);
         stopToken_ = token;
         if (RespectsStop<Derived>::value && token.stop_requested()) {
             status_ = UV_ECANCELED;

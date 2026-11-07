@@ -1,5 +1,7 @@
 #pragma once
 
+#include "uvco/core/co2_compat.hpp"
+
 #include <climits>
 #include <cstddef>
 #include <limits>
@@ -311,7 +313,7 @@ class ReadAwaiter {
     bool await_ready() const noexcept { return false; }
 
     template <class Promise> bool await_suspend(co2::coroutine_handle<Promise> const waiting) {
-        return block_->suspendRead(waiting, buf_, co2::detail::stopTokenOf(waiting));
+        return block_->suspendRead(waiting, buf_, ::uvco::detail::co2compat::stopTokenOf(waiting));
     }
 
     Result<std::size_t> await_resume() noexcept { return block_->resumeRead(); }
@@ -328,7 +330,7 @@ template <class Self, class Block> class AcceptAwaiter {
     bool await_ready() const noexcept { return false; }
 
     template <class Promise> bool await_suspend(co2::coroutine_handle<Promise> const waiting) {
-        return block_->suspendAccept(waiting, co2::detail::stopTokenOf(waiting));
+        return block_->suspendAccept(waiting, ::uvco::detail::co2compat::stopTokenOf(waiting));
     }
 
     Result<Self> await_resume() {
@@ -370,7 +372,7 @@ class WriteAwaiter {
     template <class Promise> bool await_suspend(co2::coroutine_handle<Promise> const waiting) {
         UVCO_CONTRACT_CHECK(block_->loop().isLoopThread());
         UVCO_CONTRACT_CHECK(req_ == nullptr && not started_);
-        if (co2::detail::stopTokenOf(waiting).stop_requested()) {
+        if (::uvco::detail::co2compat::stopTokenOf(waiting).stop_requested()) {
             status_ = UV_ECANCELED;
             return false;
         }

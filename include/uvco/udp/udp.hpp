@@ -1,5 +1,7 @@
 #pragma once
 
+#include "uvco/core/co2_compat.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -140,7 +142,7 @@ class UdpBlock final : public HandleBlock {
     // 推迟的“没有等待者就停止接收”：一个手写、不占堆的协程帧，经 loop.schedule 在下一轮执行
     // （与 run() 的完成帧同一手法）。排队期间以 holdBegin() 保证控制块活着（不妨碍句柄析构）。
     struct StopFrame {
-        co2::detail::FrameHeader header{&co2::detail::noopDestroy, &UdpBlock::onStopStep, false,
+        ::uvco::detail::co2compat::FrameHeader header{&::uvco::detail::co2compat::noopDestroy, &UdpBlock::onStopStep, false,
                                         false};
         UdpBlock* owner = nullptr;
     };
@@ -216,7 +218,7 @@ class UdpBlock final : public HandleBlock {
         loop().schedule(co2::coroutine_handle<>::from_address(&stopFrame_.header));
     }
 
-    static co2::detail::FrameHeader* onStopStep(co2::detail::FrameHeader* const header) {
+    static ::uvco::detail::co2compat::FrameHeader* onStopStep(::uvco::detail::co2compat::FrameHeader* const header) {
         UdpBlock& self = *reinterpret_cast<StopFrame*>(header)->owner;
         self.stopQueued_ = false;
         // 被恢复的等待者可能已经再次 recv()：那就继续接收。
@@ -250,7 +252,7 @@ class UdpRecvAwaiter {
     bool await_ready() const noexcept { return false; }
 
     template <class Promise> bool await_suspend(co2::coroutine_handle<Promise> const waiting) {
-        return block_->suspendRecv(waiting, buf_, co2::detail::stopTokenOf(waiting));
+        return block_->suspendRecv(waiting, buf_, ::uvco::detail::co2compat::stopTokenOf(waiting));
     }
 
     Result<Datagram> await_resume() noexcept { return block_->resumeRecv(); }
@@ -304,7 +306,7 @@ class UdpSendAwaiter {
     template <class Promise> bool await_suspend(co2::coroutine_handle<Promise> const waiting) {
         UVCO_CONTRACT_CHECK(block_->loop().isLoopThread());
         UVCO_CONTRACT_CHECK(req_ == nullptr && not started_);
-        if (co2::detail::stopTokenOf(waiting).stop_requested()) {
+        if (::uvco::detail::co2compat::stopTokenOf(waiting).stop_requested()) {
             status_ = UV_ECANCELED;
             return false;
         }

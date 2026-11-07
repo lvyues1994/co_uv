@@ -1,5 +1,7 @@
 #pragma once
 
+#include "uvco/core/co2_compat.hpp"
+
 #include <chrono>
 #include <cstdint>
 #include <utility>
@@ -158,7 +160,7 @@ class TickAwaiter {
     bool await_ready() const noexcept { return false; }
 
     template <class Promise> bool await_suspend(co2::coroutine_handle<Promise> const waiting) {
-        return block_->suspendTick(waiting, co2::detail::stopTokenOf(waiting));
+        return block_->suspendTick(waiting, ::uvco::detail::co2compat::stopTokenOf(waiting));
     }
 
     Result<std::uint64_t> await_resume() noexcept { return block_->resumeTick(); }

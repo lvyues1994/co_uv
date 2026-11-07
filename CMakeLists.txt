@@ -35,6 +35,26 @@ else()
     FetchContent_MakeAvailable(co2)
 endif()
 
+# Capability probe, including installed co2 where a pinned FetchContent commit
+# cannot protect us. Check exact detail hooks instead of a numeric preview version.
+include(CheckCXXSourceCompiles)
+get_target_property(_uvco_co2_includes co2::co2 INTERFACE_INCLUDE_DIRECTORIES)
+set(CMAKE_REQUIRED_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/include")
+foreach(_inc IN LISTS _uvco_co2_includes)
+    if(_inc MATCHES "^\\$<BUILD_INTERFACE:(.*)>$")
+        list(APPEND CMAKE_REQUIRED_INCLUDES "${CMAKE_MATCH_1}")
+    elseif(NOT _inc MATCHES "\\$<")
+        list(APPEND CMAKE_REQUIRED_INCLUDES "${_inc}")
+    endif()
+endforeach()
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/cmake/co2_capability.cpp" _uvco_probe)
+unset(UVCO_CO2_COMPATIBLE CACHE)
+check_cxx_source_compiles("${_uvco_probe}" UVCO_CO2_COMPATIBLE)
+unset(CMAKE_REQUIRED_INCLUDES)
+if(NOT UVCO_CO2_COMPATIBLE)
+    message(FATAL_ERROR "Incompatible co2 internal API. See cmake/co2_capability.cpp and CMakeConfigureLog.yaml")
+endif()
+
 # ---- libuv --------------------------------------------------------------------
 # 顺序：CMake config 包 → pkg-config → FetchContent。
 set(UVCO_LIBUV_TARGET "")
