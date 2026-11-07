@@ -17,6 +17,7 @@
 #include "uvco/core/config.hpp"
 #include "uvco/core/error.hpp"
 #include "uvco/core/handle.hpp"
+#include "uvco/core/wait_slot.hpp"
 #include "uvco/core/loop.hpp"
 #include "uvco/core/result.hpp"
 #include "uvco/stream/address.hpp"
@@ -70,62 +71,45 @@ class UdpBlock final : public HandleBlock {
     bool suspendRecv(co2::coroutine_handle<> const waiter, MutableBuffer const buf,
                      co2::stop_token token) {
         UVCO_CONTRACT_CHECK(loop().isLoopThread());
-        if (recvState_ != State::idle)
+        if (not recvSlot_.idle())
             UVCO_CONTRACT_FAIL("uvco udp: concurrent recv() on the same socket");
         UVCO_CONTRACT_CHECK(buf.data != nullptr && buf.size != 0);
-        recvState_ = State::done;
-        recvSuspended_ = false;
+        recvSlot_.begin();
         recvTruncated_ = false;
         if (token.stop_requested()) {
-            recvStatus_ = UV_ECANCELED;
+            recvSlot_.set(static_cast<Errc>(UV_ECANCELED));
             return false;
         }
         if (closing()) {
-            recvStatus_ = UV_EBADF;
+            recvSlot_.set(static_cast<Errc>(UV_EBADF));
             return false;
         }
         if (recvError_ != 0) { // 没有等待者时收到的错误，交给下一个 recv
-            recvStatus_ = std::exchange(recvError_, 0);
+            recvSlot_.set(static_cast<Errc>(std::exchange(recvError_, 0)));
             return false;
         }
         if (not receiving_) {
             // 这里不可能在本套接字的 recv 回调里：recv 的完成总是推迟恢复。
             int const status = uv_udp_recv_start(&udp_, &UdpBlock::onAlloc, &UdpBlock::onRecv);
             if (status < 0) {
-                recvStatus_ = status;
+                recvSlot_.set(static_cast<Errc>(status));
                 return false;
             }
             receiving_ = true;
         }
         recvBuf_ = buf;
-        recvWaiter_ = waiter;
-        recvState_ = State::pending;
-        recvSuspended_ = true;
+        recvSlot_.pend(waiter);
         opBegin();
         recvCancel_.arm(loop(), std::move(token), &UdpBlock::onRecvCancel, this);
         return true;
     }
 
     Result<Datagram> resumeRecv() noexcept {
-        UVCO_CONTRACT_CHECK(recvState_ == State::done);
         recvCancel_.disarm();
-        ssize_t const status = recvStatus_;
-        bool const suspended = recvSuspended_;
-        Datagram d;
-        if (status >= 0) {
-            d.size = static_cast<std::size_t>(status);
-            d.sender = recvSender_;
-            d.truncated = recvTruncated_;
-        }
-        Result<Datagram> result = status < 0
-                                      ? Result<Datagram>{static_cast<Errc>(static_cast<int>(status))}
-                                      : Result<Datagram>{d};
-        recvState_ = State::idle;
-        recvSuspended_ = false;
-        recvWaiter_ = nullptr;
+        auto taken = recvSlot_.take();
         recvBuf_ = MutableBuffer{};
-        if (suspended) opEnd(); // 最后一步：之后控制块可能已被释放
-        return result;
+        if (taken.suspended) opEnd();
+        return std::move(taken.result);
     }
 
   protected:
@@ -133,11 +117,10 @@ class UdpBlock final : public HandleBlock {
 
     void abortPending() noexcept override {
         receiving_ = false; // uv_close 已经停止接收
-        if (recvState_ == State::pending) finishRecv(UVCO_EABORTED);
+        if (recvSlot_.pending()) finishRecv(UVCO_EABORTED);
     }
 
   private:
-    enum class State : unsigned char { idle, pending, done };
 
     // 推迟的“没有等待者就停止接收”：一个手写、不占堆的协程帧，经 loop.schedule 在下一轮执行
     // （与 run() 的完成帧同一手法）。排队期间以 holdBegin() 保证控制块活着（不妨碍句柄析构）。
@@ -159,7 +142,7 @@ class UdpBlock final : public HandleBlock {
 
     static void onAlloc(uv_handle_t* const handle, std::size_t, uv_buf_t* const buf) noexcept {
         UdpBlock& self = fromData<UdpBlock>(handle->data);
-        if (self.recvState_ == State::pending) {
+        if (self.recvSlot_.pending()) {
             std::size_t const size =
                 self.recvBuf_.size < maxBufLen() ? self.recvBuf_.size : maxBufLen();
             buf->base = self.recvBuf_.data; // 直接读进等待者的缓冲区
@@ -177,7 +160,7 @@ class UdpBlock final : public HandleBlock {
         // 0 字节且没有地址：套接字已读空，不是空数据报（空数据报总带着来源地址）。
         if (nread == 0 && addr == nullptr) return;
         // 本回调里绝不停止接收、绝不恢复协程：都推迟到下一轮。
-        if (self.recvState_ != State::pending) {
+        if (not self.recvSlot_.pending()) {
             // 没有交出过缓冲区，不可能读到数据：UV_ENOBUFS（数据报留在内核里），或错误。
             if (nread < 0 && nread != UV_ENOBUFS) self.recvError_ = static_cast<int>(nread);
             self.requestStop();
@@ -192,23 +175,24 @@ class UdpBlock final : public HandleBlock {
 
     static void onRecvCancel(void* const context) noexcept {
         auto& self = *static_cast<UdpBlock*>(context);
-        if (self.recvState_ != State::pending) return;
+        if (not self.recvSlot_.pending()) return;
         // 在 loop 的投递回调里，不在 recv 回调里：可以直接停止。先停止，再恢复——
         // 被恢复的协程可能立刻再次 recv()。
         if (self.receiving_) {
             static_cast<void>(uv_udp_recv_stop(&self.udp_));
             self.receiving_ = false;
         }
-        self.recvStatus_ = UV_ECANCELED;
-        self.recvState_ = State::done;
-        self.recvWaiter_.resume(); // 之后不再访问 self
+        auto const waiter = self.recvSlot_.complete(Errc::canceled);
+        waiter.resume(); // no self access afterwards
     }
 
     // 总是推迟恢复：既用于 recv 回调，也用于 close()（用户调用栈）。
     void finishRecv(ssize_t const status) noexcept {
-        recvStatus_ = status;
-        recvState_ = State::done;
-        resumeLater(recvWaiter_);
+        Result<Datagram> result = status < 0
+            ? Result<Datagram>{static_cast<Errc>(static_cast<int>(status))}
+            : Result<Datagram>{Datagram{static_cast<std::size_t>(status), recvSender_, recvTruncated_}};
+        auto const waiter = recvSlot_.complete(std::move(result));
+        resumeLater(waiter);
     }
 
     void requestStop() noexcept {
@@ -222,7 +206,7 @@ class UdpBlock final : public HandleBlock {
         UdpBlock& self = *reinterpret_cast<StopFrame*>(header)->owner;
         self.stopQueued_ = false;
         // 被恢复的等待者可能已经再次 recv()：那就继续接收。
-        if (self.receiving_ && self.recvState_ != State::pending && not self.closing()) {
+        if (self.receiving_ && not self.recvSlot_.pending() && not self.closing()) {
             static_cast<void>(uv_udp_recv_stop(&self.udp_));
             self.receiving_ = false;
         }
@@ -231,13 +215,10 @@ class UdpBlock final : public HandleBlock {
     }
 
     uv_udp_t udp_{};
-    co2::coroutine_handle<> recvWaiter_;
+    WaitSlot<Datagram> recvSlot_;
     MutableBuffer recvBuf_;
     SocketAddress recvSender_;
-    ssize_t recvStatus_ = 0;
     int recvError_ = 0;
-    State recvState_ = State::idle;
-    bool recvSuspended_ = false;
     bool recvTruncated_ = false;
     bool receiving_ = false;
     bool stopQueued_ = false;
