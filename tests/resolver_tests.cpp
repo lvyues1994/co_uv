@@ -4,10 +4,10 @@
 #include "uvco/core/run.hpp"
 #include "uvco/timer/sleep.hpp"
 namespace {
-auto lookup(uvco::DnsResolver& resolver)
- CO2_BEG(co2::Task<uvco::Result<uvco::AddressList>>, (resolver), uvco::Result<uvco::AddressList> r; addrinfo hints{};) {
+auto lookup(uvco::DnsResolver& resolver,std::string host="127.0.0.1")
+ CO2_BEG(co2::Task<uvco::Result<uvco::AddressList>>, (resolver,host), uvco::Result<uvco::AddressList> r; addrinfo hints{};) {
  hints.ai_family=AF_INET; hints.ai_flags=AI_NUMERICHOST; hints.ai_socktype=SOCK_STREAM;
- CO2_AWAIT_SET(r,resolver.resolve("127.0.0.1","80",hints)); CO2_RETURN(r);
+ CO2_AWAIT_SET(r,resolver.resolve(std::move(host),"80",hints)); CO2_RETURN(r);
 } CO2_END
 }
 TEST_CASE("resolver cache is opt in and invalidation separates generations") {
@@ -78,5 +78,27 @@ TEST_CASE("resolver cache clock reentrant invalidation cannot republish an old g
  uvco::DnsResolver* owner=nullptr;int clocks=0;
  uvco::DnsResolver resolver{loop,options,provider(counts),[&]{if(++clocks==2)owner->invalidate();return std::chrono::steady_clock::time_point{};}};
  owner=&resolver;CHECK(uvco::run(loop,lookup(resolver)));CHECK(clocks==2);CHECK(resolver.cacheSize()==0);
+}
+
+TEST_CASE("resolver LRU entry bounds and local age eviction are deterministic") {
+ uvco::Loop loop;auto counts=std::make_shared<Counts>();uvco::DnsCacheOptions options;options.enabled=true;options.maxEntries=2;
+ options.maxAge=std::chrono::milliseconds{2};auto now=std::chrono::steady_clock::time_point{};
+ uvco::DnsResolver resolver{loop,options,provider(counts),[&]{return now;}};
+ auto a=uvco::run(loop,lookup(resolver));auto b=uvco::run(loop,lookup(resolver,"127.0.0.2"));CHECK(a && b);
+ CHECK(*uvco::run(loop,lookup(resolver))==*a);CHECK(uvco::run(loop,lookup(resolver,"127.0.0.3")));
+ CHECK(resolver.cacheSize()==2);auto again=uvco::run(loop,lookup(resolver,"127.0.0.2"));CHECK(again && *again!=*b);CHECK(counts->calls==4);
+ now+=std::chrono::milliseconds{2};auto expired=uvco::run(loop,lookup(resolver));CHECK(expired && *expired!=*a);CHECK(counts->calls==5);
+ CHECK(resolver.cacheSize()==1);
+}
+TEST_CASE("resolver byte budget skips oversized entries and subscriber budget refuses excess") {
+ uvco::Loop loop;auto counts=std::make_shared<Counts>();uvco::DnsCacheOptions options;options.enabled=true;options.maxBytes=1;
+ uvco::DnsResolver tiny{loop,options,provider(counts)};auto a=uvco::run(loop,lookup(tiny));auto b=uvco::run(loop,lookup(tiny));
+ CHECK(a && b && *a!=*b);CHECK(tiny.cacheSize()==0);CHECK(counts->calls==2);
+ options.maxSubscribers=1;uvco::DnsResolver bounded{loop,options,provider(counts)};auto first=lookup(bounded),second=lookup(bounded);
+ uvco::detail::RunCompletion ca{loop},cb{loop};
+ uvco::detail::co2compat::TaskAccess::start(first,ca.handle(),{});
+ uvco::detail::co2compat::TaskAccess::start(second,cb.handle(),{});
+ CHECK(cb.finished);CHECK(uvco::detail::co2compat::TaskAccess::takeResult(second).error()==uvco::Errc::busy);
+ loop.runUntilIdle();CHECK(ca.finished);CHECK(uvco::detail::co2compat::TaskAccess::takeResult(first));
 }
 UVCO_TEST_MAIN

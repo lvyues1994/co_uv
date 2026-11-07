@@ -12,6 +12,10 @@ extern "C" int __real_uv_kill(int,int);
 extern "C" int __wrap_uv_kill(int pid,int signal) {
  if(pid<0){++groupCalls;return 0;}return __real_uv_kill(pid,signal);
 }
+extern "C" int __real_kill(pid_t,int);
+extern "C" int __wrap_kill(pid_t pid,int signal) {
+ if(pid<0){++groupCalls;return 0;}return __real_kill(pid,signal);
+}
 namespace {
 auto wait(uvco::Process& p) CO2_BEG(co2::Task<>,(p),uvco::Result<uvco::ExitStatus> status;) {
  CO2_AWAIT_SET(status,p.wait());CHECK(status);
