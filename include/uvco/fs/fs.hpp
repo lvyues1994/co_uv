@@ -253,7 +253,35 @@ using WriteOp = FsOp<detail::WriteSpec>;
 using FsyncOp = FsOp<detail::FsyncSpec>;
 using FtruncateOp = FsOp<detail::FtruncateSpec>;
 using FstatOp = FsOp<detail::FstatSpec>;
-using CloseOp = FsOp<detail::CloseSpec>;
+// Closing is resource cleanup, not a cancelable operation. Own the fd even
+// before await_suspend, so dropping the awaiter cannot leak it.
+class CloseOp : public uvco::detail::ReqAwaiter<CloseOp, uv_fs_t, void> {
+    using Base = uvco::detail::ReqAwaiter<CloseOp, uv_fs_t, void>;
+  public:
+    static constexpr bool cancellable = false;
+    static constexpr bool respectStop = false;
+    explicit CloseOp(Loop& loop, uv_file fd = -1) : Base{loop} { spec_.fd=fd; }
+    CloseOp(CloseOp&& other) noexcept : Base{std::move(other)}, spec_{other.spec_} {
+        other.spec_.fd=-1;
+    }
+    ~CloseOp() { if(spec_.fd>=0) detail::closeSync(spec_.fd); }
+    detail::CloseSpec& args() noexcept {
+        UVCO_CONTRACT_CHECK(not this->inFlight()); return spec_;
+    }
+    int start(uv_loop_t* loop) {
+        uv_file fd=std::exchange(spec_.fd,-1);
+        int status=uv_fs_close(loop,&req_,fd,&onDone);
+        if(status<0) { uv_fs_req_cleanup(&req_); if(fd>=0) detail::closeSync(fd); }
+        return status;
+    }
+    Result<void> finish(int status) { return fromStatus(status); }
+  private:
+    static void onDone(uv_fs_t* r) {
+        int status=r->result<0 ? static_cast<int>(r->result) : 0;
+        uv_fs_req_cleanup(r); Base::complete(r,status);
+    }
+    detail::CloseSpec spec_;
+};
 using SendfileOp = FsOp<detail::SendfileSpec>;
 
 // ---- File ----

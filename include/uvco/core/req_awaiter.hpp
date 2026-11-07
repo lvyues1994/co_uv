@@ -53,6 +53,10 @@ template <class Derived>
 struct IsCancellable<Derived, typename std::enable_if<not Derived::cancellable>::type>
     : std::false_type {};
 
+template<class D, class = void> struct RespectsStop : std::true_type {};
+template<class D> struct RespectsStop<D, typename std::enable_if<not D::respectStop>::type>
+ : std::false_type {};
+
 template <class Awaiter> struct AwaiterRef {
     Awaiter* awaiter;
 
@@ -95,7 +99,7 @@ template <class Derived, class Req, class T> class ReqAwaiter {
         UVCO_CONTRACT_CHECK(state_ == State::idle);
         UVCO_CONTRACT_CHECK(loop_->isLoopThread());
         co2::stop_token token = co2::detail::stopTokenOf(waiting);
-        if (token.stop_requested()) {
+        if (RespectsStop<Derived>::value && token.stop_requested()) {
             status_ = UV_ECANCELED;
             state_ = State::done;
             return false;

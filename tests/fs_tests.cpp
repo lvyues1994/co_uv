@@ -426,6 +426,23 @@ TEST_CASE("fs: ~Loop drives an in-flight request to completion (no abort for req
     CHECK(handle.join());
 }
 
+auto closeStopped(fs::CloseOp& op)
+ CO2_BEG(co2::Task<Result<void>>, (op), Result<void> r;) {
+ CO2_AWAIT_SET(r,op); CO2_RETURN(r);
+} CO2_END
+TEST_CASE("fs regression: close retains ownership and ignores stop") {
+ uvco::Loop loop; int fd=::open("/dev/null",O_RDONLY); CHECK(fd>=0);
+ fs::File file{loop,fd}; auto op=file.close(); co2::stop_source stop;stop.request_stop();
+ auto r=uvco::run(loop,closeStopped(op),stop.get_token()); CHECK(r);
+ bool leaked=::fcntl(fd,F_GETFD)!=-1;
+ if(leaked) ::close(fd);
+ CHECK(not leaked);
+}
+TEST_CASE("fs regression: unawaited close owns fd") {
+ uvco::Loop loop; int fd=::open("/dev/null",O_RDONLY); CHECK(fd>=0);
+ {fs::File file{loop,fd};auto op=file.close();}
+ bool leaked=::fcntl(fd,F_GETFD)!=-1;if(leaked)::close(fd); CHECK(not leaked);
+}
 int main() {
     int const rc = ::uvco_test::runAll();
     static_cast<void>(::rmdir(scratch().c_str()));
