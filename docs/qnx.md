@@ -48,4 +48,5 @@ pipe_connect_to_file 两项已知失败。该记录是特定 port/测试环境�
    QNX 上同样可能生效，是进程级副作用；必须验证 EPIPE 与子进程信号行为，而非假定是 Linux-only。
 5. 当前没有 QNX CI/SDK/设备。uvco 已增加 FsEvent：fallible `FsEvent::watch(loop,path)` 工厂
    将 init 的 ENOSYS 作为 Result 错误返回，不关闭未初始化 handle，不隐式替换为轮询；Linux 包装 init 的
-   故障回归验证了清理路径，但不是 QNX 目标机测试。新加的 macOS/Windows CI 也只是非阻塞探路，不改变支持承诺。
+   故障回归验证了清理路径，但不是 QNX 目标机测试。需要轮询时可显式选 `FsPoll::start(loop,path,interval)`；
+   该模块使用公开 uv_fs_poll API 与 stat 副本，不依赖 inotify/procfs，仍需目标机验证。新加的 macOS/Windows CI 也只是非阻塞探路，不改变支持承诺。

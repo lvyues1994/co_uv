@@ -6,7 +6,9 @@ namespace fs = uvco::fs;
 namespace {
 int initStatus = 0;
 int startStatus = 0;
+#if defined(UVCO_TEST_APPEND_SYMBOL)
 int appendFault = 0;
+#endif
 uv_fs_event_t* target = nullptr;
 uv_fs_event_cb callback = nullptr;
 void inject(char const* name, int events = UV_CHANGE, int status = 0) {

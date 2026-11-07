@@ -14,7 +14,7 @@ function(uvco_configure_test target)
     endif()
 endfunction()
 
-set(uvco_test_names fs_event_tests libuv_header_tests listener_tests udp_options_tests yield_turn_tests dir_tests buffered_reader_tests capture_tests wait_slot_tests work_tests dns_tests when_all_results_tests when_any_exception_tests process_portable_tests result_tests loop_tests thread_tests timer_tests sync_tests udp_tests lifecycle_tests
+set(uvco_test_names fs_event_tests fs_poll_tests fs_watch_concurrent_next_contract_test libuv_header_tests listener_tests udp_options_tests yield_turn_tests dir_tests buffered_reader_tests capture_tests wait_slot_tests work_tests dns_tests when_all_results_tests when_any_exception_tests process_portable_tests result_tests loop_tests thread_tests timer_tests sync_tests udp_tests lifecycle_tests
     run_wrong_thread_contract_test orphan_handle_use_contract_test timer_pending_destroy_contract_test
     sync_event_destroy_contract_test sync_when_any_empty_contract_test
     stream_concurrent_read_contract_test udp_concurrent_recv_contract_test)
@@ -218,3 +218,18 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_test(NAME uvco-fs-event-fault-tests COMMAND uvco-fs-event-fault-tests)
     set_tests_properties(uvco-fs-event-fault-tests PROPERTIES TIMEOUT 45)
 endif()
+
+target_compile_definitions(uvco-fs-poll-tests PRIVATE UVCO_TEST_WATCH_DIR="${CMAKE_CURRENT_BINARY_DIR}")
+set_tests_properties(uvco-fs-poll-tests PROPERTIES TIMEOUT 45)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(uvco-fs-poll-fault-tests fs_poll_fault_tests.cpp)
+    uvco_configure_test(uvco-fs-poll-fault-tests)
+    target_compile_definitions(uvco-fs-poll-fault-tests PRIVATE UVCO_TEST_WATCH_DIR="${CMAKE_CURRENT_BINARY_DIR}")
+    target_link_options(uvco-fs-poll-fault-tests PRIVATE "-Wl,--wrap=uv_fs_poll_init" "-Wl,--wrap=uv_fs_poll_start")
+    add_test(NAME uvco-fs-poll-fault-tests COMMAND uvco-fs-poll-fault-tests)
+    set_tests_properties(uvco-fs-poll-fault-tests PROPERTIES TIMEOUT 45)
+endif()
+
+target_compile_definitions(uvco-fs-watch-concurrent-next-contract-test PRIVATE
+    UVCO_TEST_WATCH_FILE="${CMAKE_CURRENT_SOURCE_DIR}/fs_poll_tests.cpp")
+set_tests_properties(uvco-fs-watch-concurrent-next-contract-test PROPERTIES TIMEOUT 15)

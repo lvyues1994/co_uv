@@ -4,3 +4,4 @@
 
 #include "uvco/fs/dir.hpp"
 #include "uvco/fs/fs_event.hpp"
+#include "uvco/fs/fs_poll.hpp"

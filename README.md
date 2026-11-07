@@ -8,7 +8,7 @@
 设计见 [docs/architecture.md](docs/architecture.md)。
 
 当前进度：v0.1 第 1 步 **core**（`Result<T>`、`Loop`、`run()`、`detail::ReqAwaiter`）、第 2 步 **timer**（`sleep()`、`Timer`、通用句柄生命周期）、第 3 步 **sync**（`Event`、`Mutex`、`Channel<T>`、`whenAny`、`timeout`）、第 4 步 **stream**（`Tcp`、`Pipe`：拉模式 read、write、shutdown、listen/accept、connect）、第 5 步 **udp**（`Udp`：拉模式 recv 返回 `Datagram`、send、connect）、第 6 步 **fs**（`File`、`open`/`stat`/`unlink`/`mkdir`/`rename`/`mkstemp`/`scandir`/`copyfile`/`sendfile` 等、`readFile`/`writeFile`，迟到取消不泄漏 fd）。
-v0.1 范围（文档 §5）已全部实现；另已增加 **process**（`spawn`、可取消 `wait`、`kill`、stdio Pipe）；现已增加 **dns**（`getaddrinfo/getnameinfo`）、**work**（`queueWork`）与 Result-aware `whenAllResults`；signal/tty/poll 留待后续。
+v0.1 范围（文档 §5）已全部实现；另已增加 **process**（`spawn`、可取消 `wait`、`kill`、stdio Pipe）；现已增加 **dns**（`getaddrinfo/getnameinfo`）、**work**（`queueWork`）与 Result-aware `whenAllResults`；另已增加 **fs watchers**（`FsEvent` / `FsPoll`）；signal/tty/通用 fd poll 留待后续。
 
 ## 要求
 
@@ -212,6 +212,11 @@ CO2_AWAIT_SET(event, watched->next()); // Result<FsEventInfo>{owned filename, ev
 // events 是 UV_RENAME / UV_CHANGE 位掩码；filename 不可确定时为空。
 // watched->watch(newPath, flags) 事务式重启；失败保留旧监控。
 // watched->stop() 中止等待，CO2_AWAIT(watched->close()) 等待安全关闭。
+
+auto polled = uvco::fs::FsPoll::start(loop, filename, std::chrono::milliseconds{1000});
+// 检查 polled 后：
+CO2_AWAIT_SET(change, polled->next()); // Result<FsPollChange>{prev/curr uv_stat_t 副本}
+// polled->setInterval(2s) 或 polled->start(newPath, 2s) 重启；interval() 查看设置。
 ```
 
 `next()` 单等待者；从 awaiter 构造起保活控制块。stop_token 只取消本次等待（canceled），
@@ -220,16 +225,30 @@ CO2_AWAIT_SET(event, watched->next()); // Result<FsEventInfo>{owned filename, ev
 空/移走/已 close 对象只能析构或 close；Loop 先析构后同样只允许 close/析构。
 有挂起 next 时直接析构所有者仍是契约违规，请先 stop/close 并等待读者结束。
 
-默认固定 **32 条** FIFO；相邻同名 FsEvent 合并 rename/change 位，相邻相同错误合并；
+默认固定 **32 条** FIFO；相邻同名 FsEvent 合并 rename/change 位；FsPoll 成功快照不合并，保留顺序。相邻相同错误合并；
 满时丢最旧条目。`queued()` / `overflowCount()` / `coalescedCount()` 可观测（计数饱和不回绕）。
 stop 清空缓存但保留计数；成功重启清空缓存并归零计数。它不是可靠文件系统日志，
 内核也可能合并/丢通知；容量限制条目数，不是 allocator 字节上限。
-文件名复制 bad_alloc → ENOMEM，其他投影异常缓存并从 next 的 await_resume 重抛，绝不跨 C 回调抛出。
+错误/投影异常也占队列条目，溢出时同样可能被丢弃。文件名复制 bad_alloc → ENOMEM，其他投影异常缓存并从 next 的 await_resume 重抛，绝不跨 C 回调抛出。
 
 flags 使用 libuv 常量：默认 0；`UV_FS_EVENT_RECURSIVE` 仅 Windows/macOS 接受，Linux 等返回 ENOTSUP。
 `UV_FS_EVENT_STAT` / WATCH_ENTRY 上游没有实现，本封装明确返回 ENOTSUP，**不隐式降级为轮询**。
 不支持的后端（例如 QNX 的 no-fsevents）由 watch 工厂返回 ENOSYS，见 [QNX 说明](docs/qnx.md)。
-宏观语义由 Linux 实测，macOS/Windows CI 仍为非阻塞，QNX 尚无目标机验证。
+`FsPoll` 用 stat 轮询；已有文件的首次成功 stat 只建立基线，不产生通知。
+缺失/无权限等回调状态以 Result 错误交付，监控不停止；错误原因或文件状态变化后继续通知。
+成功时 prev/curr 均为按值副本，恢复后的 prev 可能是零快照或上次成功 stat。
+interval 必须是 [1, UINT_MAX] 毫秒；跨文件系统推荐多秒间隔，短间隔不保证发现所有变化。
+`setInterval/start/watch` 成功均开启新监控代次（重新建基线，期间变化不保证完整），
+分配新控制块且旧 native 请求异步排空；失败保留旧监控/缓存/配置。这也避免旧 libuv fs_poll
+在 stat 在途时对同一 native handle stop/start 引发旧上下文复活。uvco 不额外建线程或无界队列（stat 仍用 libuv 全局线程池，原生后端缓存由 libuv/OS 管理）。
+
+FsEvent 不承诺被监控目标自身 rename/delete 后自动跟随或重新订阅，请按 backend 语义显式 watch 重建。
+FsPoll 按路径持续 stat，缺失后可恢复；stop 不强制中断已提交的 stat，close/~Loop 可能等待底层 I/O。
+active watcher 会保持原生 loop 存活，调用 drain 前须 stop/close（run 仍只驱动到根任务完成）。
+
+本次 Linux 验证：g++、clang++、ASan/UBSan、TSan 四配置各 **45/45 CTest，完整重复 3 轮**；
+新增 5 组 watcher 测试另各重复 20 轮，含 install/consumer/两 TU 检查。日志在 `build/review/fs-watchers/`。
+macOS/Windows CI 仍为非阻塞，QNX 尚无目标机验证；CI 不需改动，CMake 自动纳入新增测试。
 
 ## GitHub CI
 
@@ -247,7 +266,7 @@ flags 使用 libuv 常量：默认 0；`UV_FS_EVENT_RECURSIVE` 仅 Windows/macOS
   不关闭 sanitizer、不靠重试或过滤掩盖报告。本地机器未修改此设置。
 
 本地验证方法：`build/ci-tools/actionlint .github/workflows/ci.yml`（工具不提交）。
-本轮本地通过 GCC/Clang 的 Debug/Release、ASan/UBSan、TSan，六配置各 40 个 CTest；
+CI 接入时（watcher 加入前）的本地历史记录：GCC/Clang Debug/Release、ASan/UBSan、TSan 六配置各 40 个 CTest；
 另通过强制 FetchContent 发现路径的真实 libuv/co2 构建、独立安装及 39 个 CTest（使用本地 source override，
 libuv 源自校验过的官方 v1.48.0 归档，不测试 Git 下载）。actionlint 1.7.12 检查通过。
 Release 检查发现 fs 测试的替代 new/delete 被 GCC 优化误报，单独用 noinline 保持 hook 边界，

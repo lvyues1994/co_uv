@@ -39,7 +39,8 @@ TEST_CASE("FsEvent detects directory create modify rename delete with owned file
 TEST_CASE("FsEvent cancellation leaves watch running and explicit stop aborts later") {
     uvco::Loop loop;
     Files files;
-    auto watcher = fs::FsEvent::watch(loop, files.path);
+    files.write("quiet", "baseline");
+    auto watcher = fs::FsEvent::watch(loop, files.file("quiet"));
     if (!watcher && watcher.error() == static_cast<uvco::Errc>(UV_ENOSYS)) return;
     CHECK(watcher);
     co2::stop_source stop;
@@ -55,10 +56,11 @@ TEST_CASE("FsEvent cancellation leaves watch running and explicit stop aborts la
     auto result = pending.join();
     CHECK(!result && result.error() == uvco::Errc::canceled);
     CHECK(watcher->isActive());
-    files.write("after-cancel", "x");
-    CHECK(uvco::run(loop, matching(loop, *watcher, "after-cancel", UV_RENAME)));
+    files.write("quiet", "more", true);
+    auto changed = uvco::run(loop, next(loop, *watcher));
+    CHECK(changed && (changed->events & UV_CHANGE) != 0);
     // Restart clears any remaining notifications, then stop aborts only on loop dispatch.
-    CHECK(watcher->watch(files.path));
+    CHECK(watcher->watch(files.file("quiet")));
     auto stopped = co2::spawn(loop, rawNext(*watcher));
     pump(loop);
     CHECK(!stopped.isReady());
@@ -74,9 +76,10 @@ TEST_CASE("FsEvent cancellation leaves watch running and explicit stop aborts la
 
 TEST_CASE("FsEvent close leases and Loop teardown retain blocks safely") {
     Files files;
+    files.write("quiet", "baseline");
     {
         uvco::Loop loop;
-        auto watcher = fs::FsEvent::watch(loop, files.path);
+        auto watcher = fs::FsEvent::watch(loop, files.file("quiet"));
         if (!watcher && watcher.error() == static_cast<uvco::Errc>(UV_ENOSYS)) return;
         CHECK(watcher);
         auto lease = watcher->next();
@@ -87,7 +90,7 @@ TEST_CASE("FsEvent close leases and Loop teardown retain blocks safely") {
         CHECK(!r && r.error() == uvco::Errc::aborted);
     }
     auto loop = std::unique_ptr<uvco::Loop>{new uvco::Loop};
-    auto watcher = fs::FsEvent::watch(*loop, files.path);
+    auto watcher = fs::FsEvent::watch(*loop, files.file("quiet"));
     CHECK(watcher);
     auto pending = co2::spawn(*loop, rawNext(*watcher));
     pump(*loop);

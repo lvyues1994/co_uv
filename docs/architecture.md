@@ -346,6 +346,24 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
   会让 `~Loop` 一直等下去）。
 - 测试在 io_uring 开 / 关两种模式下各跑一遍（ctest 的 `UV_USE_IO_URING=1` / `=0`）。
 
+#### FS watchers（handle 通知层）
+
+- `FsEvent::watch(loop,path,flags)->Result<FsEvent>`；成员 `watch(path,flags)->Result<void>` 重启。
+  `next()->Result<FsEventInfo{std::string filename,int events}>`；events 为 UV_RENAME/UV_CHANGE 位。
+- `FsPoll::start(loop,path,interval=1s)->Result<FsPoll>`；成员 start(path,interval)、setInterval、interval。
+  `next()->Result<FsPollChange{uv_stat_t prev,curr}>`；负状态单独作为 Result 错误，不读取无效快照。
+- 共用 WatchBlock/WatchQueue + HandleBlock/HandleRef/WaitSlot/CancelHook，不共用 FsOp（native handle 而非 req）。
+  固定 32 条 FIFO，相邻同名 event 合并位、相同错误合并；poll 成功快照不合并。满时丢最旧，overflow/coalesced
+  饱和计数可观测；stop 清空缓存保留计数，成功 restart 换新块并归零。错误/投影异常同样占队列容量，可能被丢弃。
+- next 单等待者（含 done 未 take 的预约）；预取消不取缓存，运行中取消不停止监控；第一个 loop 完成赢迟取消。
+  stop/close/restart/~Loop → aborted 延后恢复；native 回调内联恢复后不再访问控制块。关闭前已构造的 next lease 保活，
+  Loop 已销毁后不准启动新操作；直接析构仍挂起的所有者沿用 Handle 契约违规。
+- FsPoll 首次成功 stat 仅建基线；错误不停止监控，路径恢复后继续通知。interval 限 1..UINT_MAX 毫秒，
+  多秒间隔更可移植。更改间隔/路径是新代次，会重建基线；不用同 native handle 的立即 stop/start，避免旧 libuv
+  在 stat 在途时复活旧 ctx。新块创建失败保留旧配置/缓存；原请求通过旧块的 uv_close 排空。
+- ENOSYS init 不调用 uv_close；FsEvent STAT/WATCH_ENTRY 明确 ENOTSUP，recursive 只在 macOS/Windows 放行。
+  QNX 无 native fs_event 时工厂返回 ENOSYS，可由调用者显式选择 FsPoll，不自动替换语义。
+
 ### 4.9 process（v0.1 之后的扩展）
 
 `uvco/process.hpp` 提供 `spawn(loop, ProcessOptions)` → `Result<Process>`。
@@ -507,7 +525,7 @@ openDir 的投影异常/迟到取消同步 closedir；readDir 只消耗游标，
   source 与 installed config 复用 co2 能力/真实 libuv >=1.40 头文件编译探测；不运行探测程序。
   parent 源 target 传递 usage 显式收集；不能求值的复杂 source generator expression 拒绝而不是误验系统头。
 
-- **FS 通知通道**：FsEvent 为 fallible watch 工厂 + HandleBlock/HandleRef/WaitSlot；固定 32 条 FIFO，
+- **FS 通知通道**：FsEvent/FsPoll 为 fallible watch/start 工厂 + HandleBlock/HandleRef/WaitSlot；固定 32 条 FIFO，
   相邻同名事件合并位，相邻同错误合并，满时丢最旧并累计 overflow。计数饱和；stop 清缓存保留计数，
   成功事务式 restart 新控制块并归零。取消只针对 next，完成先于迟到取消；stop/close/restart 延后恢复。
   init 失败直接释放未初始化控制块，绝不调用 uv_close；回调投影的 bad_alloc→ENOMEM，其他异常按条目保存，
@@ -549,7 +567,7 @@ openDir 的投影异常/迟到取消同步 closedir；readDir 只消耗游标，
 
 - DNS 暂无缓存、Happy Eyeballs、resolver 注入；Work 不强制中断，取消不撤销副作用。
 - P2 已增加 capture/BufferedReader、目录迭代、UDP multicast 选项、listener 门面与 yieldNextTurn；
-  FsEvent 已实现；待扩展 Signal/TTY/fs_poll。未更改 Process reap-on-destruct 或可能阻塞 Loop 析构的策略。
+  FsEvent/FsPoll 已实现；待扩展 Signal/TTY/通用 fd poll。未更改 Process reap-on-destruct 或可能阻塞 Loop 析构的策略。
 - capture 不保留错误时部分输出，无信号升级/跨平台 process-tree 后端；POSIX leader 已回收后
   不再寻址旧 PGID。BufferedReader cap 不是硬 allocator 限额；Dir close 是同步清理。
 
@@ -794,3 +812,31 @@ CMake 3.14 的命令兼容性保留但未实机运行；Windows/macOS、多配�
 - 实测：Linux create/modify/rename/delete、跨线程取消、close 未启动 lease、Loop 析构和 fd 稳定性；
   --wrap 覆盖 ENOSYS init / EACCES start 清理、固定容量/顺序/合并、预取消保留缓存、迟取消、投影异常。
   不把 Linux 测试结果解释为 macOS/Windows/QNX 认证。
+
+### 实现 fs watcher：FsPoll
+
+- 新增 fs/fs_poll.hpp；复用 FsEvent 的 bounded WatchBlock，无 worker 结果借用、无私有 libuv ctx 访问。
+- `FsPoll::start(loop,path,interval)` 工厂 + 同名成员重启；setInterval 同样事务式新块，不把 native start 的
+  “active 时返回成功但不改间隔”误当修改成功，也避免 libuv 1.48 fs-poll.c 的在途 stop/start 旧 ctx 复活。
+  代价是每次重启分配控制块/native ctx、重建 stat 基线；旧句柄异步关闭，close/Loop 等待原 stat 清理。
+  queue 上限不限制 libuv/OS 自己的缓存或用户不停重启而不驱动 loop 的旧代次；需要正常驱动 loop 排空。
+- 负状态交付 Result 错误，watch 保持 active；成功回调复制两份 uv_stat_t 后才能恢复。不同成功快照不合并。
+- 测试：真实 missing→create→append→delete→recreate；40 次初始 stat 在途重启、interval 验证、timeout/
+  跨线程取消/stop/restart/close/Loop 销毁、构造期 lease、Linux fd 稳定；--wrap 验证栈快照副本、32 条
+  FIFO overflow、错误合并、预取消、迟取消、init/start 失败及失败 restart 保留缓存。共享 next 并发契约独立测试。
+- 尚未实机验证 macOS/Windows/QNX；fs_event 平台差异、网络 FS 的丢/合并事件不由本封装消除。
+  目标自身 rename/delete 不承诺自动跟随/重建 FsEvent；FsPoll 按路径可恢复。stop 不强制中断已提交 stat，
+  close/~Loop 可能等待底层 I/O；active watch 保持 loop 存活，drain 前应 stop/close。
+
+### FS watchers 验证边界
+
+- final backend error 即使 native handle 已失活也进入缓存/交付；仅 closing 禁止交付，避免漏终止错误。
+- 真实事件测试的 create/modify/rename/delete 使用不同预置文件，避免旧 change 满足下一阶段；
+  纯取消/生命周期测试监控静止文件，避开 macOS directory FSEvents 的 start 前事件许可。均无耗时下界断言。
+- 故障注入覆盖 wrapper 投影字符串分配、init 整体失败、start 调用边界失败；未注入 libuv 内部每个 malloc 点。
+  不依赖 libuv 私有 poll_ctx；native 的部分初始化/allocator 极端失败行为仍由所链接 libuv 负责。
+
+- 本次最终 Linux 树：g++ / clang++ / ASan+UBSan / TSan 四配置，完整构建均包含公共头独立包含检查；
+  各 45/45 CTest 完整重复 3 次（每配置 135 次执行），含 install/consumer/两 TU；新增 5 组 watcher
+  另各重复 20 次（每配置 100 次执行）。无 sanitizer 报告。日志 build/review/fs-watchers/{gcc,clang,asan,tsan}-*.log。
+  此处不继承上轮 CI 接入时的 Release/FetchContent 实测声明；本轮未重跑那些额外配置，未运行远端 CI。
