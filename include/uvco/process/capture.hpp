@@ -28,7 +28,11 @@ struct CaptureState {
         if(proc.isOpen() && options.cancel!=CaptureCancel::stopWaiting){
             if(options.cancel==CaptureCancel::killGroup){
 #ifndef _WIN32
-                killError=uv_kill(-proc.pid(),options.killSignal);
+                // Reuse Process's exited/closing guard before addressing a PGID.
+                // Once the leader was reaped we cannot safely identify a stale
+                // numeric group; do not signal a potentially reused identifier.
+                auto alive=proc.kill(0);
+                killError=alive ? uv_kill(-proc.pid(),options.killSignal) : toInt(alive.error());
 #else
                 killError=UV_ENOSYS;
 #endif
