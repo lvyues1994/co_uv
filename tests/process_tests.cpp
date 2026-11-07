@@ -20,7 +20,7 @@ auto waitFor(uvco::Process& p)
 TEST_CASE("process exit codes") {
  uvco::Loop loop;
  for(int code : {0, 1, 42}) {
-  uvco::ProcessOptions o; o.file="/bin/sh"; o.args={"-c", "exit " + std::to_string(code)};
+  uvco::ProcessOptions o; o.file=UVCO_TEST_PROCESS_HELPER; o.args={"exit", std::to_string(code)};
   auto p=uvco::spawn(loop,o); CHECK(p);
   auto r=uvco::run(loop,waitFor(*p)); CHECK(r && r->exit_status==code && r->term_signal==0);
  }
@@ -58,19 +58,19 @@ std::size_t fds() {
  closedir(d); return n;
 }
 uvco::ProcessOptions sleeper() {
- uvco::ProcessOptions o; o.file="/bin/sleep"; o.args={"30"}; return o;
+ uvco::ProcessOptions o; o.file=UVCO_TEST_PROCESS_HELPER; o.args={"sleep","30"}; return o;
 }
 }
 TEST_CASE("process stdout echo pipe") {
  uvco::Loop loop; uvco::Pipe out{loop};
- uvco::ProcessOptions o; o.file="/bin/echo"; o.args={"hello"};
+ uvco::ProcessOptions o; o.file=UVCO_TEST_PROCESS_HELPER; o.args={"echo","hello"};
  o.stdio={uvco::ProcessStdio::ignore(),uvco::ProcessStdio::createPipe(out,false,true)};
  auto p=uvco::spawn(loop,o); CHECK(p);
  CHECK(uvco::run(loop,output(*p,out))=="hello\n");
 }
 TEST_CASE("process stdin cat roundtrip") {
  uvco::Loop loop; uvco::Pipe in{loop},out{loop};
- uvco::ProcessOptions o; o.file="/bin/cat";
+ uvco::ProcessOptions o; o.file=UVCO_TEST_PROCESS_HELPER;o.args={"cat"};
  o.stdio={uvco::ProcessStdio::createPipe(in,true,false),uvco::ProcessStdio::createPipe(out,false,true)};
  auto p=uvco::spawn(loop,o); CHECK(p);
  CHECK(uvco::run(loop,exchange(*p,in,out))=="hello cat\n");
@@ -111,7 +111,7 @@ TEST_CASE("process explicit close aborts wait without killing") {
 }
 TEST_CASE("process loop destruction aborts wait but reaps child before returning") {
  auto loop=std::unique_ptr<uvco::Loop>{new uvco::Loop};
- auto o=sleeper();o.args={"0.03"};auto p=uvco::spawn(*loop,o);CHECK(p);auto pid=p->pid();
+ auto o=sleeper();o.args={"sleep","0.03"};auto p=uvco::spawn(*loop,o);CHECK(p);auto pid=p->pid();
  auto h=co2::spawn(*loop,waitFor(*p));uv_run(loop->raw(),UV_RUN_NOWAIT);
  loop.reset();CHECK(h.isReady());auto r=h.join();
  CHECK(not r && r.error()==uvco::Errc::aborted);
@@ -119,7 +119,7 @@ TEST_CASE("process loop destruction aborts wait but reaps child before returning
 }
 TEST_CASE("process destructor hands running child to reap-only block") {
  uvco::Loop loop; uv_pid_t pid=0;
- {auto o=sleeper();o.args={"0.03"};auto p=uvco::spawn(loop,o);CHECK(p);pid=p->pid();}
+ {auto o=sleeper();o.args={"sleep","0.03"};auto p=uvco::spawn(loop,o);CHECK(p);pid=p->pid();}
  CHECK(::kill(pid,0)==0);uvco::drain(loop);
  int status=0;CHECK(::waitpid(pid,&status,WNOHANG)==-1 && errno==ECHILD);
 }
@@ -138,7 +138,7 @@ TEST_CASE("process errors and fd cleanup") {
 }
 TEST_CASE("process env and cwd") {
  uvco::Loop loop; uvco::Pipe out{loop}; uvco::ProcessOptions o;
- o.file="/bin/sh"; o.args={"-c","printf '%s:%s' \"$UVCO_TEST\" \"$PWD\""};
+ o.file=UVCO_TEST_PROCESS_HELPER;o.args={"envcwd"};
  o.env={"UVCO_TEST=ok"}; o.cwd=UVCO_TEST_PROCESS_DIR;
  o.stdio={uvco::ProcessStdio::ignore(),uvco::ProcessStdio::createPipe(out,false,true)};
  auto p=uvco::spawn(loop,o); CHECK(p);
@@ -149,7 +149,7 @@ TEST_CASE("process true false and successful spawn fd cleanup") {
  {
   uvco::Loop loop;
   for(int i=0;i<20;++i) {
-   uvco::ProcessOptions o; o.file=i%2==0 ? "/bin/true" : "/bin/false";
+   uvco::ProcessOptions o; o.file=UVCO_TEST_PROCESS_HELPER;o.args={"exit",std::to_string(i%2)};
    auto p=uvco::spawn(loop,o); CHECK(p);
    auto r=uvco::run(loop,waitFor(*p)); CHECK(r && r->exit_status==i%2);
   }
@@ -162,7 +162,7 @@ TEST_CASE("process invalid stdio rejected without libuv assertion") {
  auto r=uvco::spawn(loop,o); CHECK(not r && r.error()==uvco::Errc::invalid_argument);
 }
 TEST_CASE("process inherit fd and detached option") {
- uvco::Loop loop; uvco::ProcessOptions o; o.file="/bin/true"; o.detached=true;
+ uvco::Loop loop; uvco::ProcessOptions o; o.file=UVCO_TEST_PROCESS_HELPER;o.args={"exit","0"}; o.detached=true;
  o.stdio={uvco::ProcessStdio::inherit(0),uvco::ProcessStdio::inherit(1),uvco::ProcessStdio::inherit(2)};
  auto p=uvco::spawn(loop,o); CHECK(p); auto r=uvco::run(loop,waitFor(*p));
  CHECK(r && r->exit_status==0);
@@ -174,7 +174,7 @@ auto delayedWait(uvco::detail::ProcessWaitAwaiter& op)
  CO2_AWAIT_SET(r,std::move(op));CO2_RETURN(r);
 } CO2_END
 TEST_CASE("regression: unstarted wait survives close") {
- uvco::Loop loop;uvco::ProcessOptions o;o.file="/bin/true";
+ uvco::Loop loop;uvco::ProcessOptions o;o.file=UVCO_TEST_PROCESS_HELPER;o.args={"exit","0"};
  auto p=uvco::spawn(loop,o);CHECK(p);auto op=p->wait();
  {auto c=p->close();}uvco::drain(loop);
  auto r=uvco::run(loop,delayedWait(op));CHECK(not r && r.error()==uvco::Errc::aborted);

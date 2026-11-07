@@ -14,11 +14,18 @@ function(uvco_configure_test target)
     endif()
 endfunction()
 
-foreach(name IN ITEMS result_tests loop_tests thread_tests req_awaiter_tests timer_tests
-                      sync_tests stream_tests udp_tests fs_tests process_tests lifecycle_tests
-                      run_wrong_thread_contract_test orphan_handle_use_contract_test timer_pending_destroy_contract_test
-                      sync_event_destroy_contract_test sync_when_any_empty_contract_test
-                      stream_concurrent_read_contract_test udp_concurrent_recv_contract_test)
+set(uvco_test_names process_portable_tests result_tests loop_tests thread_tests timer_tests sync_tests udp_tests lifecycle_tests
+    run_wrong_thread_contract_test orphan_handle_use_contract_test timer_pending_destroy_contract_test
+    sync_event_destroy_contract_test sync_when_any_empty_contract_test
+    stream_concurrent_read_contract_test udp_concurrent_recv_contract_test)
+if(UNIX)
+    list(APPEND uvco_test_names stream_tests req_awaiter_tests)
+endif()
+# FIFO, /proc/self/fd and waitpid lifecycle tests are Linux-specific.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    list(APPEND uvco_test_names fs_tests process_tests)
+endif()
+foreach(name IN LISTS uvco_test_names)
     string(REPLACE "_" "-" target "uvco-${name}")
     add_executable(${target} ${name}.cpp)
     uvco_configure_test(${target})
@@ -33,20 +40,33 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT MSVC)
     add_test(NAME uvco-keepalive-release-race-test COMMAND uvco-keepalive-release-race-test)
 endif()
 
-# Pipe 测试的套接字文件放在构建目录里。
-target_compile_definitions(uvco-stream-tests PRIVATE
-    UVCO_TEST_PIPE_DIR="${CMAKE_CURRENT_BINARY_DIR}")
-
-# fs 测试的临时文件只放在构建目录里；io_uring 开 / 关各跑一遍（libuv ≥1.45 在 Linux 上可能
-# 把 fs 请求交给 io_uring，此时 uv_cancel 返回 EBUSY）。
-target_compile_definitions(uvco-fs-tests PRIVATE
-    UVCO_TEST_TMP_DIR="${CMAKE_CURRENT_BINARY_DIR}")
-set_tests_properties(uvco-fs-tests PROPERTIES ENVIRONMENT "UV_USE_IO_URING=1")
-add_test(NAME uvco-fs-tests-no-io-uring COMMAND uvco-fs-tests)
-set_tests_properties(uvco-fs-tests-no-io-uring PROPERTIES ENVIRONMENT "UV_USE_IO_URING=0")
-
-target_compile_definitions(uvco-req-awaiter-tests PRIVATE
-    UVCO_TEST_SOURCE_FILE="${CMAKE_CURRENT_SOURCE_DIR}/req_awaiter_tests.cpp")
+if(TARGET uvco-stream-tests)
+    target_compile_definitions(uvco-stream-tests PRIVATE UVCO_TEST_PIPE_DIR="${CMAKE_CURRENT_BINARY_DIR}")
+endif()
+if(TARGET uvco-req-awaiter-tests)
+    target_compile_definitions(uvco-req-awaiter-tests PRIVATE
+        UVCO_TEST_SOURCE_FILE="${CMAKE_CURRENT_SOURCE_DIR}/req_awaiter_tests.cpp")
+endif()
+if(TARGET uvco-fs-tests)
+    target_compile_definitions(uvco-fs-tests PRIVATE UVCO_TEST_TMP_DIR="${CMAKE_CURRENT_BINARY_DIR}")
+    set_tests_properties(uvco-fs-tests PROPERTIES ENVIRONMENT "UV_USE_IO_URING=1")
+    add_test(NAME uvco-fs-tests-no-io-uring COMMAND uvco-fs-tests)
+    set_tests_properties(uvco-fs-tests-no-io-uring PROPERTIES ENVIRONMENT "UV_USE_IO_URING=0")
+endif()
+add_executable(uvco-process-helper process_helper.cpp)
+uvco_configure_test(uvco-process-helper)
+# The child is a fixture, not the instrumented library under test; avoid a
+# second sanitizer runtime in every subprocess (including signal-kill tests).
+if(NOT MSVC)
+    target_compile_options(uvco-process-helper PRIVATE -fno-sanitize=all)
+    target_link_options(uvco-process-helper PRIVATE -fno-sanitize=all)
+endif()
+if(TARGET uvco-process-tests)
+    add_dependencies(uvco-process-tests uvco-process-helper)
+    target_compile_definitions(uvco-process-tests PRIVATE
+        UVCO_TEST_PROCESS_DIR="${CMAKE_CURRENT_BINARY_DIR}"
+        UVCO_TEST_PROCESS_HELPER="$<TARGET_FILE:uvco-process-helper>")
+endif()
 
 # 每个公共头文件都必须能单独包含。
 file(GLOB_RECURSE uvco_public_headers CONFIGURE_DEPENDS
@@ -62,4 +82,8 @@ endforeach()
 add_library(uvco-header-self-containment OBJECT ${uvco_header_sources})
 uvco_configure_test(uvco-header-self-containment)
 
-target_compile_definitions(uvco-process-tests PRIVATE UVCO_TEST_PROCESS_DIR="${CMAKE_CURRENT_BINARY_DIR}")
+
+
+add_dependencies(uvco-process-portable-tests uvco-process-helper)
+target_compile_definitions(uvco-process-portable-tests PRIVATE
+    UVCO_TEST_PROCESS_HELPER="$<TARGET_FILE:uvco-process-helper>")
