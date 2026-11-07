@@ -2,7 +2,7 @@
 
 状态：**用户已批准，分阶段实现中**。五项默认已确认：hook 默认 unref、拒绝 SIGPIPE、
 DNS cache 默认关闭、HE 核心子集、kill-tree 先 POSIX group 后 Windows Job。
-当前已实现统一内核、FsEvent/FsPoll/Timer 无行为变更迁移及 Signal、phase hooks/高级适配；下文 API 仍需结合各阶段实际交付状态阅读。
+当前已实现统一内核、FsEvent/FsPoll/Timer 无行为变更迁移及 Signal、phase hooks/高级适配、TTY duplicate 流；DNS cache/HE/POSIX group 尚未实现。下文 API 仍需结合各阶段实际交付状态阅读。
 基线：`main@48d201f`；工作目录 `/home/lvyues/code/uvcoro/co_uv`。
 核对：2026-11-07（北京时间）。所有 API 片段均为拟议接口。
 

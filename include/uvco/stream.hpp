@@ -9,3 +9,5 @@
 #include "uvco/stream/buffered_reader.hpp"
 
 #include "uvco/stream/listener.hpp"
+
+#include "uvco/stream/tty.hpp"

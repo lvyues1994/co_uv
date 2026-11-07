@@ -542,6 +542,15 @@ openDir 的投影异常/迟到取消同步 closedir；readDir 只消耗游标，
 - 原生通知仍内联；用户 stop/close/restart 延后恢复；预构造 next 持有旧代次 HandleRef。
   ~Loop 原有 resident 关闭/孤儿策略不变。stream read/UDP recv 不并入通知缓存。
 
+### TTY/console 边界
+
+TtyBlock 复用 StreamBlock（只新增只读 hasReadReservation 查询），public Tty 只提供流数据/模式/尺寸操作，
+不继承会导出 listen/accept 的 StreamHandle。duplicate 始终保留 caller fd；native init 失败不 uv_close。
+通过公开 uv_fileno 比较 native descriptor 与辅助 duplicate，避免 Unix reopen 泄漏与 fallback 双关。
+Windows 先确保 CRT duplicate >2，避免进入 native stdio HANDLE 再复制分支；仍需实机验证。
+显式 mode 更改在 read 预约期间返回 busy；beginClose 与 loopClosing 都在关闭前尽力 Normal，
+不使用全局 reset；原生 setMode 的阻塞/失败限制仍存在。精确 ModeGuard/独占租约留给后续子步骤。
+
 ## 8. 待定问题
 
 - uvco core 依赖 co2 的若干 `detail` 接口：`TaskAccess`（启动 Task / 取结果）、`stopTokenOf`
@@ -563,7 +572,7 @@ openDir 的投影异常/迟到取消同步 closedir；readDir 只消耗游标，
   tuple/range 外壳仍各自维护；与 co2::whenAll 的更深层统一仍应在 co2 侧完成。
 - sync 原语不支持跨线程使用；跨线程通信目前只能经 `scheduleOn(loop)` 回到 loop 线程再操作。
 - timeout 功能测试已去掉毫秒级耗时断言；独立 timer 精度测试仍保留容差，不代表硬实时保证。
-- stream：无 `Tty`；Pipe 不支持 IPC（传递句柄）与 Linux 抽象套接字（`uv_pipe_bind2` 需 libuv ≥1.46，
+- stream：已有 duplicate-only `Tty`，精确 ModeGuard 仍待实现；Pipe 不支持 IPC（传递句柄）与 Linux 抽象套接字（`uv_pipe_bind2` 需 libuv ≥1.46，
   而最低版本为 1.40）；不能在不关闭流的情况下取消写；connect 取消会关闭流；Windows 行为未测试
   （命名管道、`uv_try_write` 语义不同）。
 - stream 依赖 libuv 的若干实现行为（已在 1.48 源码核对）：无 accept 时保留一个已接受 fd 并停止监听、
@@ -578,9 +587,18 @@ openDir 的投影异常/迟到取消同步 closedir；readDir 只消耗游标，
 
 - DNS 暂无缓存、Happy Eyeballs、resolver 注入；Work 不强制中断，取消不撤销副作用。
 - P2 已增加 capture/BufferedReader、目录迭代、UDP multicast 选项、listener 门面与 yieldNextTurn；
-  FsEvent/FsPoll 已实现；待扩展 Signal/TTY/通用 fd poll。未更改 Process reap-on-destruct 或可能阻塞 Loop 析构的策略。
+  FsEvent/FsPoll/Signal/phase/TTY 已实现；待扩展通用 fd poll 与精确终端 ModeGuard。未更改 Process reap-on-destruct 或可能阻塞 Loop 析构的策略。
 - capture 不保留错误时部分输出，无信号升级/跨平台 process-tree 后端；POSIX leader 已回收后
   不再寻址旧 PGID。BufferedReader cap 不是硬 allocator 限额；Dir close 是同步清理。
+
+### Block 2 后续（未实现，不与已交付混淆）
+
+- Resolver 缓存默认关闭；owned immutable 结果、有界 single-flight、订阅者取消、Loop-first producer drain 仍待实现。
+  注意原设计提及 KeepAlive，但现有 ~Loop 禁止存活 KeepAlive；不能直接组合后宣称支持 Loop-first，须选择 native request/resident 保活或专门设计内部 drain lease。
+- HE 核心子集与 POSIX signalGroup 按批准顺序继续；Windows Job、完整 RFC6724/NAT64、精确终端 snapshot/租约另行里程碑。
+- Signal 外部 disposition 共存无法保证；callback count 不是 POSIX 信号发送数。
+- phase ref 不等于 wakeup；Idle 可能空转；无 generator sugar（保留 next 循环），避免未验证的帧取消/销毁语义。
+- Windows/macOS 原生 Signal/TTY/phase 尚未本地验证，CI 仍为非阻塞实验 job。
 
 ## 9. 与原设计的偏差（实现 core 时记录）
 
@@ -868,3 +886,19 @@ onPrepare/onCheck 自动启动；onIdle 初始停止，避免注册即 CPU spin�
 Prepare/Check 不提供 poll wakeup/下一轮保证；没有 hidden idle。既有 yieldNextTurn 测试保持通过。
 策略统一 offer/take/empty/clear/stats；Latest 覆盖（含相同错误），FIFO 相邻相同错误合并，规则不互相污染。
 新增阶段顺序测试用主动启动的 Idle 驱动 Event，不靠毫秒阈值；另测 unref、deferred commit、预取消、stop 与 Loop 先销毁。
+
+### TTY duplicate 实现与保守选择
+
+实现可失败 duplicate 工厂，read/write/tryWrite/shutdown/尺寸/模式沿用 libuv 能力；无网络 listener API。
+init/allocation 故障注入证明辅助 duplicate 及时关闭且 caller fd 保留；不 uv_close 未初始化句柄。
+Normal 恢复同时覆盖 owner close 与 ~Loop；精确 snapshot guard 未实现，应用须独占 mode 区间。
+Hook onIdle 初始停止（需要 start），onPrepare/onCheck 自动启动；这是避免无意忙转的保守具体化。
+当前无可派发独立 reviewer 工具；已做本地生命周期/所有权审查，但不能冒称独立代码 review 已完成。
+
+### Block 2 已交付部分最终验证
+
+在新工作目录中，g++ Debug / clang++ Debug / clang++ ASan+UBSan / clang++ TSan 各通过
+**54 个 CTest 目标 × 3 次**；其中 14 个 watcher/迁移/Signal/phase/TTY/故障目标各再重复 **20 次**。
+ASan 开启 leak 检测，UBSan/TSan halt_on_error；无 sanitizer 报告。含全部独立头、安装/搬迁消费者与两 TU ODR 检查。
+原测试源文件保持不变，仅新增测试并登记 CMake。CI 无需调整，现有 matrix 自动构建新目标；未 push。
+这是 watcher/Signal/phase/TTY 的验证，不代表尚未实现的 Resolver/HE/group 已交付。

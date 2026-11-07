@@ -311,3 +311,23 @@ CO2_AWAIT_SET(seen, check->next());     // latest-only，延后恢复；不是 n
 Hook 按值持有 noexcept callable，无 std::function/等待者/每事件分配；用 stop/close/RAII 停止。
 高级 `Idle/Prepare/Check` 的 next 支持 stop_token、单等待者与共用诊断 stats。
 Prepare/Check 的 ref 不会唤醒阻塞 poll，真正跨轮继续用 `yieldNextTurn`。
+
+### TTY / console
+
+```cpp
+auto tty = uvco::Tty::duplicate(loop, fd); // Result<Tty>，不接管原 fd，失败也不关闭它
+// 检查 tty 后：read/write/tryWrite/shutdown 沿用零缓冲 stream 语义；没有 listen/accept。
+auto mode = tty->setMode(uvco::TtyMode::Raw); // Normal / Raw / Io（Windows Io 可返回 ENOTSUP）
+auto size = tty->getSize();                 // Result<TerminalSize>{width,height}
+// 等挂起的 read 完成后，可以显式 restore() 检查恢复错误。
+```
+
+setMode/restore 在 read 的预约尚未释放时返回 busy；close 与 ~Loop 在 native close 前尽力恢复 Normal。
+本层不调用全局 uv_tty_reset_mode；Normal 不是对任意外部修改的精确快照恢复，mode 管理须由应用独占，
+重叠 raw 区间不能由多个 owner 各自恢复。原生模式切换可能阻塞，close 恢复失败无法在析构中报告。
+Unix reopened native fd 与辅助 duplicate 分别跟踪；fallback dup 的文件状态/终端模式仍可能共享。
+重定向 stdio 返回 ENOTTY，请使用 Pipe/File；Windows 输入/输出 console 的能力与尺寸查询遵循 native 限制。
+Unix PTY 覆盖双向 I/O、模式、取消/close/Loop-first、失败所有权与 fd leak；Windows 实机尚未验证。
+
+Block 2 进度：watcher core / FsEvent→FsPoll→Timer / Signal / phase / TTY 已交付；
+DNS cache、Happy Eyeballs、POSIX signalGroup 尚未实现，Windows Job 与精确 ModeGuard 后续单独验证。

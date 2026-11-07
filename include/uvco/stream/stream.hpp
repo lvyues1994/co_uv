@@ -65,6 +65,8 @@ class StreamBlock : public HandleBlock {
     void beginOp() noexcept { opBegin(); }
     void endOp() noexcept { opEnd(); }
 
+    bool hasReadReservation() const noexcept { return !readSlot_.idle(); }
+
     // ---- read ----
 
     bool suspendRead(co2::coroutine_handle<> const waiter, MutableBuffer const buf,

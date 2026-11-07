@@ -14,7 +14,7 @@ function(uvco_configure_test target)
     endif()
 endfunction()
 
-set(uvco_test_names phase_tests signal_tests timer_migration_tests fs_poll_migration_tests fs_event_migration_tests watcher_policy_tests watcher_core_tests fs_event_tests fs_poll_tests fs_watch_concurrent_next_contract_test libuv_header_tests listener_tests udp_options_tests yield_turn_tests dir_tests buffered_reader_tests capture_tests wait_slot_tests work_tests dns_tests when_all_results_tests when_any_exception_tests process_portable_tests result_tests loop_tests thread_tests timer_tests sync_tests udp_tests lifecycle_tests
+set(uvco_test_names tty_tests phase_tests signal_tests timer_migration_tests fs_poll_migration_tests fs_event_migration_tests watcher_policy_tests watcher_core_tests fs_event_tests fs_poll_tests fs_watch_concurrent_next_contract_test libuv_header_tests listener_tests udp_options_tests yield_turn_tests dir_tests buffered_reader_tests capture_tests wait_slot_tests work_tests dns_tests when_all_results_tests when_any_exception_tests process_portable_tests result_tests loop_tests thread_tests timer_tests sync_tests udp_tests lifecycle_tests
     run_wrong_thread_contract_test orphan_handle_use_contract_test timer_pending_destroy_contract_test
     sync_event_destroy_contract_test sync_when_any_empty_contract_test
     stream_concurrent_read_contract_test udp_concurrent_recv_contract_test)
@@ -237,3 +237,19 @@ set_tests_properties(uvco-fs-watch-concurrent-next-contract-test PROPERTIES TIME
 add_dependencies(uvco-signal-tests uvco-process-helper)
 target_compile_definitions(uvco-signal-tests PRIVATE UVCO_TEST_PROCESS_HELPER="$<TARGET_FILE:uvco-process-helper>")
 set_tests_properties(uvco-signal-tests PROPERTIES TIMEOUT 30)
+
+set_tests_properties(uvco-phase-tests uvco-tty-tests PROPERTIES TIMEOUT 30)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(uvco-tty-fault-tests tty_fault_tests.cpp)
+    uvco_configure_test(uvco-tty-fault-tests)
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        set(_uvco_new_symbol _Znwm)
+    else()
+        set(_uvco_new_symbol _Znwj)
+    endif()
+    target_compile_definitions(uvco-tty-fault-tests PRIVATE
+        UVCO_TEST_REAL_NEW=__real_${_uvco_new_symbol} UVCO_TEST_WRAP_NEW=__wrap_${_uvco_new_symbol})
+    target_link_options(uvco-tty-fault-tests PRIVATE "-Wl,--wrap=uv_tty_init" "-Wl,--wrap=${_uvco_new_symbol}")
+    add_test(NAME uvco-tty-fault-tests COMMAND uvco-tty-fault-tests)
+    unset(_uvco_new_symbol)
+endif()
