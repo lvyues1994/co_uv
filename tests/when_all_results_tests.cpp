@@ -1,5 +1,7 @@
 #include <co2/co2.hpp>
 #include <tuple>
+#include <atomic>
+#include <thread>
 #include <memory>
 #include <stdexcept>
 #include <vector>
@@ -89,5 +91,45 @@ TEST_CASE("allResults pre-cancel does not start children"){
  auto r=uvco::run(loop,failing(loop,a,sa,b,sb),source.get_token());CHECK(!r);CHECK(r.error()==uvco::Errc::canceled);CHECK(!a);CHECK(!b);
 }
 TEST_CASE("allResults void range") {uvco::Loop loop;CHECK(uvco::run(loop,voidRange()));}
+
+namespace {
+auto failedRange(uvco::Loop& loop,bool& a,bool& sa,bool& b,bool& sb)
+ CO2_BEG(co2::Task<uvco::Result<std::vector<int>>>,(loop,a,sa,b,sb),
+ std::vector<co2::Task<uvco::Result<int>>> tasks;uvco::Result<std::vector<int>> r;) {
+ tasks.push_back(branch(loop,1,8,a,sa));tasks.push_back(branch(loop,-1,2,b,sb));
+ CO2_AWAIT_SET(r,uvco::whenAllResults(std::move(tasks)));CO2_RETURN(std::move(r));
+} CO2_END
+auto cancelAll(uvco::Loop& loop,bool& a,bool& sa,bool& b,bool& sb)
+ CO2_BEG(co2::Task<uvco::Result<Ints>>,(loop,a,sa,b,sb),uvco::Result<Ints> r;) {
+ CO2_AWAIT_SET(r,uvco::whenAllResults(branch(loop,1,8,a,sa),branch(loop,2,8,b,sb)));CO2_RETURN(std::move(r));
+} CO2_END
+auto parallelBranch(co2::ThreadPool& pool,std::atomic<int>& arrived,bool fail)
+ CO2_BEG(co2::Task<uvco::Result<int>>,(pool,arrived,fail)) {
+ CO2_AWAIT(co2::scheduleOn(pool));arrived.fetch_add(1,std::memory_order_acq_rel);
+ while(arrived.load(std::memory_order_acquire)<2)std::this_thread::yield();
+ if(fail)CO2_RETURN(uvco::Result<int>{uvco::Errc::invalid_argument});
+ CO2_RETURN(uvco::Result<int>{3});
+} CO2_END
+auto parallelAll(co2::ThreadPool& pool,std::atomic<int>& arrived)
+ CO2_BEG(co2::Task<uvco::Result<Ints>>,(pool,arrived),uvco::Result<Ints> r;) {
+ CO2_AWAIT_SET(r,uvco::whenAllResults(parallelBranch(pool,arrived,false),parallelBranch(pool,arrived,true)));
+ CO2_RETURN(std::move(r));
+} CO2_END
+}
+TEST_CASE("allResults range failure requests sibling stop"){
+ uvco::Loop loop;bool a=false,sa=false,b=false,sb=false;auto r=uvco::run(loop,failedRange(loop,a,sa,b,sb));
+ CHECK(!r);CHECK(r.error()==uvco::Errc::invalid_argument);CHECK(a);CHECK(b);CHECK(sa);
+}
+TEST_CASE("allResults parent cancellation forwards and drains ignoring children"){
+ uvco::Loop loop;co2::stop_source source;uv_timer_t timer{};CHECK(uv_timer_init(loop.raw(),&timer)==0);timer.data=&source;
+ CHECK(uv_timer_start(&timer,[](uv_timer_t* h){static_cast<co2::stop_source*>(h->data)->request_stop();uv_close(reinterpret_cast<uv_handle_t*>(h),nullptr);},0,0)==0);
+ bool a=false,sa=false,b=false,sb=false;auto r=uvco::run(loop,cancelAll(loop,a,sa,b,sb),source.get_token());loop.runUntilIdle();
+ CHECK(!r);CHECK(r.error()==uvco::Errc::canceled);CHECK(a);CHECK(b);CHECK(sa);CHECK(sb);
+}
+TEST_CASE("allResults concurrent completion publishes all branch state"){
+ uvco::Loop loop;co2::ThreadPool pool{2};std::atomic<int> arrived{0};auto r=uvco::run(loop,parallelAll(pool,arrived));
+ CHECK(!r);CHECK(r.error()==uvco::Errc::invalid_argument);CHECK(arrived.load()==2);
+}
 UVCO_TEST_MAIN
+
 

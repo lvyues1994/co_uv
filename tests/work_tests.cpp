@@ -69,4 +69,9 @@ TEST_CASE("Work void callable completes normally") {
  uvco::Loop loop;std::atomic<bool> called{false};auto r=uvco::run(loop,invoke(loop,[&called]{called.store(true);}));
  CHECK(r);CHECK(called.load());
 }
+TEST_CASE("Work cancellation after side effect still drains real completion") {
+ uvco::Loop loop;co2::stop_source source;std::atomic<bool> called{false};
+ auto r=uvco::run(loop,invoke(loop,[&]{called.store(true);source.request_stop();return 8;}),source.get_token());
+ CHECK(!r);CHECK(r.error()==uvco::Errc::canceled);CHECK(called.load());
+}
 int main(){uv_os_setenv("UV_THREADPOOL_SIZE","1");return uvco_test::runAll();}
