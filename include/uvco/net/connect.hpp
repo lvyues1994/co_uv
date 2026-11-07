@@ -73,6 +73,7 @@ struct ConnectRaceState {
         if(!options.clock)options.clock=[] {return std::chrono::steady_clock::now();};
 
     }
+    ~ConnectRaceState(){parentCancel.disarm();}
     void finish(Errc e) noexcept {if(done)return;error=e;done=true;stop.request_stop();changed.set();}
     void fail(std::exception_ptr e) noexcept {if(!exception)exception=std::move(e);finish(Errc::canceled);}
     static void canceled(void* p) noexcept {static_cast<ConnectRaceState*>(p)->finish(Errc::canceled);}
