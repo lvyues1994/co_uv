@@ -1,4 +1,5 @@
 #pragma once
+#include <memory>
 
 #include "uvco/core/co2_compat.hpp"
 
@@ -56,11 +57,14 @@ namespace detail {
 
 class UdpBlock final : public HandleBlock {
   public:
-    explicit UdpBlock(Loop& loop) : HandleBlock{loop} {
-        int const status = uv_udp_init(loop.raw(), &udp_);
-        UVCO_CONTRACT_CHECK(status == 0);
-        bindHandle();
+    explicit UdpBlock(Loop& loop, bool initialize = true) : HandleBlock{loop} {
+        if (initialize) { int const status = init(); UVCO_CONTRACT_CHECK(status == 0); }
         stopFrame_.owner = this;
+    }
+    int init() noexcept {
+        int const status = uv_udp_init(loop().raw(), &udp_);
+        if (status == 0) bindHandle();
+        return status;
     }
 
     uv_udp_t* udp() noexcept { return &udp_; }
@@ -379,6 +383,15 @@ class Udp : public detail::Handle<detail::UdpBlock> {
     // 空句柄（isOpen() == false），可作为帧局部变量的初值。
     Udp() noexcept = default;
     explicit Udp(Loop& loop) : Base{new detail::UdpBlock{loop}} {}
+    static Result<Udp> create(Loop& loop) {
+        std::unique_ptr<detail::UdpBlock> block;
+        try { block.reset(new detail::UdpBlock{loop, false}); }
+        catch (std::bad_alloc const&) { return Errc::no_memory; }
+        int status = block->init();
+        if (status < 0) return static_cast<Errc>(status);
+        return Udp{block.release()};
+    }
+
 
     // flags：UV_UDP_IPV6ONLY、UV_UDP_REUSEADDR 等。未绑定就 send/recv 时 libuv 自动绑定
     // 0.0.0.0:0。
@@ -446,6 +459,8 @@ class Udp : public detail::Handle<detail::UdpBlock> {
 
     // 底层 uv_udp_t（loop 线程上使用；不要 uv_close 它，也不要自行 recv_start/stop）。
     uv_udp_t* raw() const noexcept { return block().udp(); }
+  private:
+    explicit Udp(detail::UdpBlock* block) noexcept : Base{block} {}
 };
 
 } // namespace uvco

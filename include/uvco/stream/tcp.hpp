@@ -1,4 +1,5 @@
 #pragma once
+#include <memory>
 
 #include <chrono>
 #include <utility>
@@ -36,10 +37,13 @@ namespace detail {
 
 class TcpBlock final : public StreamBlock {
   public:
-    explicit TcpBlock(Loop& loop) : StreamBlock{loop} {
-        int const status = uv_tcp_init(loop.raw(), &tcp_);
-        UVCO_CONTRACT_CHECK(status == 0);
-        bindHandle();
+    explicit TcpBlock(Loop& loop, bool initialize = true) : StreamBlock{loop} {
+        if (initialize) { int const status = init(); UVCO_CONTRACT_CHECK(status == 0); }
+    }
+    int init() noexcept {
+        int const status = uv_tcp_init(loop().raw(), &tcp_);
+        if (status == 0) bindHandle();
+        return status;
     }
 
     uv_tcp_t* tcp() noexcept { return &tcp_; }
@@ -75,6 +79,15 @@ class Tcp : public detail::StreamHandle<detail::TcpBlock, Tcp> {
     // 空句柄（isOpen() == false），可作为帧局部变量的初值。
     Tcp() noexcept = default;
     explicit Tcp(Loop& loop) : Base{new detail::TcpBlock{loop}} {}
+    static Result<Tcp> create(Loop& loop) {
+        std::unique_ptr<detail::TcpBlock> block;
+        try { block.reset(new detail::TcpBlock{loop, false}); }
+        catch (std::bad_alloc const&) { return Errc::no_memory; }
+        int status = block->init();
+        if (status < 0) return static_cast<Errc>(status);
+        return Tcp{block.release()};
+    }
+
 
     // Ownership transfers only on success. On failure caller retains fd;
     // native open may still have changed descriptor flags (e.g. nonblocking).

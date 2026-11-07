@@ -1,4 +1,5 @@
 #pragma once
+#include <memory>
 
 #include "uvco/core/co2_compat.hpp"
 
@@ -64,9 +65,8 @@ using TimerPort = watcher::EventPort<std::uint64_t, watcher::LegacyTimerCount,
 class TimerBlock final : public watcher::NativeWatcherBlock<TimerBackend, TimerPort> {
     using Base = watcher::NativeWatcherBlock<TimerBackend, TimerPort>;
   public:
-    explicit TimerBlock(Loop& loop) noexcept : Base{loop} {
-        int const status = init();
-        UVCO_CONTRACT_CHECK(status == 0);
+    explicit TimerBlock(Loop& loop, bool initialize = true) noexcept : Base{loop} {
+        if (initialize) { int const status = init(); UVCO_CONTRACT_CHECK(status == 0); }
     }
     Result<void> start(std::uint64_t timeout, std::uint64_t repeat) noexcept {
         clearBuffer(); // restart does not abort an existing tick
@@ -108,6 +108,14 @@ class TickAwaiter {
 class Timer : public detail::Handle<detail::TimerBlock> {
   public:
     explicit Timer(Loop& loop) : Handle{new detail::TimerBlock{loop}} {}
+    static Result<Timer> create(Loop& loop) {
+        std::unique_ptr<detail::TimerBlock> block;
+        try { block.reset(new detail::TimerBlock{loop, false}); }
+        catch (std::bad_alloc const&) { return Errc::no_memory; }
+        int status = block->init();if(status < 0)return static_cast<Errc>(status);
+        return Timer{block.release()};
+    }
+
 
     // 启动（或重启）：从调用时刻起 timeout 后首次到期，之后每 repeat 到期一次（0 = 一次性）。清空累计。
     Result<void> start(std::chrono::milliseconds const timeout,
@@ -136,6 +144,8 @@ class Timer : public detail::Handle<detail::TimerBlock> {
 
     UVCO_NODISCARD detail::TickAwaiter tick() noexcept { return detail::TickAwaiter{block()}; }
     UVCO_NODISCARD detail::TickAwaiter next() noexcept { return tick(); }
+  private:
+    explicit Timer(detail::TimerBlock* block) noexcept : Handle{block} {}
 };
 
 } // namespace uvco

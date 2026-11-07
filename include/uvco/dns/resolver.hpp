@@ -223,8 +223,17 @@ class DnsResolver {
         if(!query)query=detail::resolverQuery;
         if(!clock)clock=[] {return std::chrono::steady_clock::now();};
         auto block=std::unique_ptr<detail::ResolverBlock>{new detail::ResolverBlock{loop,options,std::move(query),std::move(clock)}};
-        int status=block->init();if(status<0)throw std::bad_alloc{};
+        int status=block->init();if(status<0)throw std::system_error{make_error_code(static_cast<Errc>(status))};
         block_=block.release();
+    }
+
+    static Result<DnsResolver> create(Loop& loop,DnsCacheOptions options={},DnsQuery query={},DnsClock clock={}) {
+        try { return DnsResolver{loop,options,std::move(query),std::move(clock)}; }
+        catch(std::bad_alloc const&) { return Errc::no_memory; }
+        catch(std::system_error const& e) {
+            if(e.code().category()!=uv_category())throw;
+            return static_cast<Errc>(e.code().value());
+        }
     }
     DnsResolver(DnsResolver const&)=delete;
     DnsResolver& operator=(DnsResolver const&)=delete;
