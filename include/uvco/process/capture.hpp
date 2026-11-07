@@ -28,11 +28,9 @@ struct CaptureState {
         if(proc.isOpen() && options.cancel!=CaptureCancel::stopWaiting){
             if(options.cancel==CaptureCancel::killGroup){
 #ifndef _WIN32
-                // Reuse Process's exited/closing guard before addressing a PGID.
-                // Once the leader was reaped we cannot safely identify a stale
-                // numeric group; do not signal a potentially reused identifier.
-                auto alive=proc.kill(0);
-                killError=alive ? uv_kill(-proc.pid(),options.killSignal) : toInt(alive.error());
+                // kill(pid,0) cannot identify a PGID after libuv reaped its leader
+                // but before the exit callback. Require the non-reaping child check.
+                auto r=proc.signalGroup(options.killSignal);killError=r?0:toInt(r.error());
 #else
                 killError=UV_ENOSYS;
 #endif
@@ -90,7 +88,7 @@ inline auto communicate(Loop& loop,ProcessOptions options,CaptureOptions io={})
 #ifdef _WIN32
         CO2_RETURN(Result<CaptureResult>{static_cast<Errc>(UV_ENOSYS)});
 #else
-        options.detached=true; // a new session/group; never target our own group
+        options.privateGroup=true; // a new session/group; never target our own group
 #endif
     }
     options.stdio={ProcessStdio::createPipe(state.in,true,false),ProcessStdio::createPipe(state.out,false,true),ProcessStdio::createPipe(state.err,false,true)};
