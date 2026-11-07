@@ -33,7 +33,7 @@
 //   write(buf) / write(bufs) -> Result<void>
 //                                       先 uv_try_write；没写完的部分 uv_write 排队，全部交给
 //                                       内核后完成。多个 write 可以并发，按调用顺序排队。
-//                                       一旦排队就不能取消（libuv 不支持），close() 会让它以
+//                                       挂起时 stop_token 取消会关闭整个流并返回 canceled；close() 会让它以
 //                                       Errc::aborted 结束；出错时不知道写出了多少字节。
 //   shutdown() -> Result<void>          等排队的写完成后关闭写端。不可取消。
 //   listen(backlog) / accept()          accept 拉模式：没有 accept 挂起时 libuv 保留一个
@@ -357,10 +357,13 @@ class WriteAwaiter {
             status_ = UV_EBADF;
             return false;
         }
-        return start(waiting);
+        bool const pending = start(waiting);
+        if (pending) cancel_.arm(block_->loop(), ::uvco::detail::co2compat::stopTokenOf(waiting), &WriteAwaiter::onCancel, this);
+        return pending;
     }
 
     Result<void> await_resume() noexcept {
+        cancel_.disarm();
         int const status = status_;
         delete std::exchange(req_, nullptr);
         if (std::exchange(started_, false)) block_->endOp(); // 最后访问控制块
@@ -442,11 +445,16 @@ class WriteAwaiter {
         return true;
     }
 
+    static void onCancel(void* context) noexcept {
+        auto& self = *static_cast<WriteAwaiter*>(context);
+        if (!self.req_ || !self.req_->pending || self.block_->closing()) return;
+        self.canceled_ = true;
+        self.block_->closeInternally(); // wait for onWrite before releasing user buffers
+    }
     static void onWrite(uv_write_t* const req, int const status) noexcept {
         Req* const r = static_cast<Req*>(req->data);
         r->pending = false;
-        // write 不可取消：libuv 的 ECANCELED 只能来自 close。
-        r->self->status_ = status == UV_ECANCELED ? UVCO_EABORTED : status;
+        r->self->status_ = r->self->canceled_ ? UV_ECANCELED : (status == UV_ECANCELED ? UVCO_EABORTED : status);
         r->waiter.resume(); // libuv 回调里内联恢复
     }
 
@@ -457,6 +465,8 @@ class WriteAwaiter {
     int status_ = 0;
     bool single_;
     bool started_ = false;
+    bool canceled_ = false;
+    CancelHook cancel_;
 };
 
 // shutdown / connect：基于 ReqAwaiter（请求体在 awaiter 里，帧局部或 co2 槽）。

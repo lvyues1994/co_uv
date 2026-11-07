@@ -283,3 +283,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_test(NAME uvco-connect-host-fault-tests COMMAND uvco-connect-host-fault-tests)
     set_tests_properties(uvco-connect-host-fault-tests PROPERTIES TIMEOUT 30)
 endif()
+
+add_executable(uvco-write-cancel-tests write_cancel_tests.cpp)
+uvco_configure_test(uvco-write-cancel-tests)
+add_test(NAME uvco-write-cancel-tests COMMAND uvco-write-cancel-tests)
+set_tests_properties(uvco-write-cancel-tests PROPERTIES TIMEOUT 5)
