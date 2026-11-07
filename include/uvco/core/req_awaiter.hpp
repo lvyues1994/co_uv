@@ -99,6 +99,7 @@ template <class Derived, class Req, class T> class ReqAwaiter {
         UVCO_CONTRACT_CHECK(state_ == State::idle);
         UVCO_CONTRACT_CHECK(loop_->isLoopThread());
         co2::stop_token token = co2::detail::stopTokenOf(waiting);
+        stopToken_ = token;
         if (RespectsStop<Derived>::value && token.stop_requested()) {
             status_ = UV_ECANCELED;
             state_ = State::done;
@@ -150,6 +151,8 @@ template <class Derived, class Req, class T> class ReqAwaiter {
     Derived& derived() noexcept { return static_cast<Derived&>(*this); }
 
     // 请求是否在途（已发起、回调尚未到来）。
+    bool stopRequested() const noexcept { return stopToken_.stop_requested(); }
+
     bool inFlight() const noexcept { return state_ == State::pending; }
 
     Req req_{};
@@ -173,6 +176,7 @@ template <class Derived, class Req, class T> class ReqAwaiter {
     int status_ = 0;
     State state_ = State::idle;
     CancelHook cancelHook_;
+    co2::stop_token stopToken_;
 };
 
 } // namespace detail

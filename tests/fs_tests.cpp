@@ -460,6 +460,33 @@ TEST_CASE("fs regression: bad_alloc in callback completes as no_memory and clean
  uvco::Loop loop;ThrowOp op{loop,std::string{UVCO_TEST_TMP_DIR}};
  auto r=uvco::run(loop,projectFail(op));CHECK(not r && r.error()==Errc::no_memory);
 }
+namespace {
+co2::stop_source* stopAtCallback=nullptr;
+uv_fs_cb nextCallback=nullptr;
+std::string callbackPath;
+struct StopAtDoneSpec : fs::detail::MkstempSpec {
+ StopAtDoneSpec(std::string p){tpl=std::move(p);}
+ int submit(uv_loop_t* l,uv_fs_t* r,uv_fs_cb cb)const {
+  nextCallback=cb;
+  return uv_fs_mkstemp(l,r,tpl.c_str(),[](uv_fs_t* req){
+   callbackPath=req->path;stopAtCallback->request_stop();nextCallback(req);
+  });
+ }
+};
+using StopAtDoneOp=fs::FsOp<StopAtDoneSpec>;
+auto stopAtDone(StopAtDoneOp& op)
+ CO2_BEG(co2::Task<Result<fs::TempFile>>, (op),Result<fs::TempFile> r;) {
+ CO2_AWAIT_SET(r,op);CO2_RETURN(std::move(r));
+} CO2_END
+}
+TEST_CASE("fs regression: stop already requested before completion releases without dispatch") {
+ uvco::Loop loop;co2::stop_source stop;stopAtCallback=&stop;
+ auto base=openFdCount();StopAtDoneOp op{loop,path("late-XXXXXX")};
+ auto r=uvco::run(loop,stopAtDone(op),stop.get_token());
+ bool canceled=not r && r.error()==Errc::canceled;
+ if(r){r->file.reset();::unlink(r->path.c_str());}
+ CHECK(canceled);CHECK(not exists(callbackPath));CHECK(openFdCount()==base);
+}
 int main() {
     int const rc = ::uvco_test::runAll();
     static_cast<void>(::rmdir(scratch().c_str()));

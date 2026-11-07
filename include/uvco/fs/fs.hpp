@@ -235,7 +235,7 @@ class FsOp : public uvco::detail::ReqAwaiter<FsOp<Spec>, uv_fs_t, typename Spec:
         int status = 0;
         if (req->result < 0) {
             status = static_cast<int>(req->result);
-        } else if (self->cancelRequested_ && detail::Releases<Spec>::value) {
+        } else if ((self->cancelRequested_ || self->stopRequested()) && detail::Releases<Spec>::value) {
             // 取消来得太晚：请求已经成功，释放它产生的资源并报告取消。
             release(*req, detail::Releases<Spec>{});
             status = UV_ECANCELED;
