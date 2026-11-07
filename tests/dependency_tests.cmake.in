@@ -91,3 +91,18 @@ string(REPLACE ";" "\;" pkg_prefix "${pkg_prefix}")
 reject("libuv headers < 1.40" "@CMAKE_COMMAND@" -E env "PKG_CONFIG_LIBDIR=${work}/old/lib/pkgconfig" "PKG_CONFIG_PATH="
     "@CMAKE_COMMAND@" -S "@PROJECT_SOURCE_DIR@/tests/consumer" -B "${work}/old-pkg-consumer" ${common}
     "-DCMAKE_PREFIX_PATH=${pkg_prefix}")
+
+# Parent adapters may carry their header directories only transitively.
+file(MAKE_DIRECTORY "${work}/parent-wrapper")
+file(WRITE "${work}/parent-wrapper/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.14)\nproject(parent LANGUAGES C CXX)\nadd_library(parent_real INTERFACE IMPORTED)\nset_property(TARGET parent_real PROPERTY INTERFACE_INCLUDE_DIRECTORIES \"${work}/old/include\")\nadd_library(parent_wrapper INTERFACE)\nadd_library(libuv::uv ALIAS parent_wrapper)\ntarget_link_libraries(parent_wrapper INTERFACE parent_real)\nadd_subdirectory(\"@PROJECT_SOURCE_DIR@\" uvco-source)\n")
+reject("requires libuv >= 1.40" "@CMAKE_COMMAND@" -S "${work}/parent-wrapper" -B "${work}/parent-wrapper-build" ${common}
+    "-DCMAKE_PREFIX_PATH=${fetch_prefix}")
+
+# Never silently fall back to unrelated system headers for usage we cannot
+# evaluate in a source target. Imported targets support full CMake expressions.
+file(READ "${work}/parent-wrapper/CMakeLists.txt" wrapper)
+string(REPLACE "INTERFACE parent_real" "INTERFACE \"$<1:parent_real>\"" wrapper "${wrapper}")
+file(WRITE "${work}/parent-wrapper/CMakeLists.txt" "${wrapper}")
+reject("Unsupported source dependency usage" "@CMAKE_COMMAND@" -S "${work}/parent-wrapper" -B "${work}/conditional-wrapper-build" ${common}
+    "-DCMAKE_PREFIX_PATH=${fetch_prefix}")
