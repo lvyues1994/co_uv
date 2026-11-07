@@ -66,4 +66,17 @@ TEST_CASE("resolver backend exceptions drain before rethrow and bounds return bu
  uvco::DnsCacheOptions options;options.maxInFlight=0;uvco::DnsResolver bounded{loop,options};
  CHECK(uvco::run(loop,lookup(bounded)).error()==uvco::Errc::busy);
 }
+
+TEST_CASE("resolver query-factory close cannot launch a producer on a closing resident") {
+ uvco::Loop loop;auto counts=std::make_shared<Counts>();uvco::DnsResolver* owner=nullptr;
+ uvco::DnsResolver resolver{loop,{},[&](uvco::Loop& l,std::string,std::string,addrinfo){static_cast<void>(owner->close());return fake(l,counts);}};
+ owner=&resolver;CHECK(uvco::run(loop,lookup(resolver)).error()==uvco::Errc::aborted);
+ CHECK(counts->finished==0);
+}
+TEST_CASE("resolver cache clock reentrant invalidation cannot republish an old generation") {
+ uvco::Loop loop;auto counts=std::make_shared<Counts>();uvco::DnsCacheOptions options;options.enabled=true;
+ uvco::DnsResolver* owner=nullptr;int clocks=0;
+ uvco::DnsResolver resolver{loop,options,provider(counts),[&]{if(++clocks==2)owner->invalidate();return std::chrono::steady_clock::time_point{};}};
+ owner=&resolver;CHECK(uvco::run(loop,lookup(resolver)));CHECK(clocks==2);CHECK(resolver.cacheSize()==0);
+}
 UVCO_TEST_MAIN

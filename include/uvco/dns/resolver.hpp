@@ -88,6 +88,7 @@ class ResolverBlock final : public HandleBlock {
         try {
             if(options_.enabled) {
                 auto now=clock_();
+                if(stopping_){node.result=Errc::aborted;return false;}
                 for(auto i=cache_.begin();i!=cache_.end();) {
                     if(now>=i->created && std::chrono::duration_cast<std::chrono::milliseconds>(now-i->created)>=options_.maxAge){bytes_-=i->bytes;i=cache_.erase(i);continue;}
                     if(i->key==key){node.result=i->addresses;cache_.splice(cache_.begin(),cache_,i);return false;}++i;
@@ -100,6 +101,9 @@ class ResolverBlock final : public HandleBlock {
             if(!found) {
                 if(flights_.size()>=options_.maxInFlight){node.result=Errc::busy;return false;}
                 auto task=query_(loop(),key.host,key.service,key.hints());
+                // Owned injection points may synchronously close/invalidate the
+                // resolver. Never start work after its native keepalive closed.
+                if(stopping_){node.result=Errc::aborted;return false;}
                 if(!task){node.result=Errc::invalid_argument;return false;}
                 auto flight=std::unique_ptr<DnsFlight>{new DnsFlight{this,key,std::move(task)}};
                 found=flight.get();flights_.push_back(std::move(flight));launch=true;
@@ -173,6 +177,7 @@ class ResolverBlock final : public HandleBlock {
         std::size_t cost=options_.maxBytes-remaining+addresses->size()*sizeof(SocketAddress);
         try {
             auto created=clock_();
+            if(stopping_ || key.epoch!=epoch_)return;
             // Construct first: allocation failure must not evict otherwise valid cache.
             std::list<Entry> entry;entry.push_front(Entry{key,std::move(addresses),created,cost});
             while(!cache_.empty() && (cache_.size()>=options_.maxEntries || cost>options_.maxBytes-bytes_)){
