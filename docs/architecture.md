@@ -411,6 +411,46 @@ vector<成功值>，void 形式为 Result<void>，空 vector 成功。变参形�
 错误的“首个”以完成状态的原子发布顺序为准；等待者在最后一个分支完成的线程恢复。
 co2::whenAll 的 API、Result 作为值的语义、依赖源码均不改变。
 
+### 4.13 P2 可选层
+
+**Process communicate/capture**（process/capture.hpp）：自由函数在原 spawn/Process/Pipe 上组合，
+不替换 uv_spawn 后端。CaptureState 拥有三个 Pipe、Process、input 与配置；四个分支并发，
+避免写 stdin、等待 exit 或单独读 stdout 时把另一条管道堵满。每个输出有独立 cap，默认各
+1 MiB，溢出 ENOBUFS；结果不包含错误时的部分输出。aggregate 的 stop_token 经 CancelHook
+回到 loop 关闭 stdio，保证不可取消的 pending write 也走真实 libuv 回调完成。错误/取消/异常
+都 drain 所有 IO 分支。join 异常先暂存，让 kill 模式先 await Process::close/reap 再重抛。
+
+stopWaiting 为默认，只停止等待并关闭本次管道，不发信号；Process owner 析构仍交给 ref'ed
+后台 reaper，Loop 析构仍可能无限等。killChild/killGroup 显式发送 killSignal（默认 SIGTERM），
+成功后等待直接子进程退出；无自动 SIGKILL 升级。killGroup 仅 POSIX 支持并强制 detached
+创建新 session；leader 已回收时不再对旧 PGID 发信号，因此不保证处理这时留下的后代。
+Windows group 返回 ENOSYS；kill 失败不 abort，返回诊断/保留原业务错误并保留既有回收责任。
+后代持有输出 fd 时仍可能延迟 EOF；调用者须使用取消/期限并选择适当的终止策略。
+
+**BufferedReader**（stream/buffered_reader.hpp）：可选、非拷贝、不移动，借用 Stream；核心
+stream 不增加缓存。readExactly/readLine/readToEnd 的未消费数据在 cap/EOF/取消错误时保留；
+只有成功构造输出字符串后才推进 offset。LF 不交付，CR 保留，最后未换行行会交付一次。
+cap 限制输出字节，单次 fill 可额外 read-ahead 4096 字节，已有大缓冲的 capacity 不自动缩小。
+一个 reader 只允许一个操作，且不能与底层直接 read 混用。reader/stream 须活过其 Task。
+
+**Descriptor adoption / listener**：Tcp::open/Pipe::open 成功才接管 fd，失败仍由调用者拥有，
+不保证 native 调用改变的 flags 回滚。仅包装 libuv 的检查，不额外猜测 fd 类型；
+调用者须保证正确类型和唯一所有权，不能依赖 native 拒绝错误类型/非活跃句柄重复接管。
+TcpListener/PipeListener 只包装原 Tcp/Pipe，不拆 StreamBlock；连接流与监听角色在新增门面
+上分离，旧 API 保持兼容，原并发等待和析构契约不变。
+
+**Directory**（fs/dir.hpp）：Dir 是 shared native-state 的 move-only owner；每个 ReadDirSpec
+从构造起持有 lease。内部固定 64 个 uv_dirent_t，每次可请求 1..64 项，复制名字后 req_cleanup。
+FsOp 新增可选 noexcept completed 钩子，确保失败、取消、投影异常也释放 busy 预约。
+openDir 的投影异常/迟到取消同步 closedir；readDir 只消耗游标，取消失败后的成功仍交付结果。
+最后 lease 析构同步关闭；显式 close 同步且检查无在途 read，将 native 指针清空，旧的未启动
+操作随后报 EBADF。Dir 可以仅析构于 Loop 之后，但不能在那里启动新操作。
+
+**Next-turn yield**（core/yield.hpp）：独立 ReqAwaiter + LoopResident，内嵌 check/idle 两句柄；
+两次 check visit 确保至少跨一轮，idle 驱动避免只有 check 时 poll 阻塞。两个 close callback
+完成后才恢复或报告 canceled/aborted；不是精确一次 iteration 或公平性/实时性保证。
+原 scheduleOn 与各模块恢复策略不变。
+
 ## 5. v0.1 范围（已定）
 
 | 模块 | 包含 |
@@ -455,6 +495,11 @@ co2::whenAll 的 API、Result 作为值的语义、依赖源码均不改变。
 - **请求异常边界**：DNS guard 在恢复前释放 addrinfo；Work worker 捕获 exception_ptr，
   after-work 后重抛。二者都在完成回调入口线性化取消，未发起时仍遵循 ReqAwaiter 的先看取消。
 
+- **P2 存储优化**：whenAny range 用 unique_ptr<Entry[]> 固定存储，每项含 slot/end/exception/child；
+  Task vector 独立。只减少 bookkeeping 分配，不改变 eager collection、loser 异常或 drain 语义。
+- **libuv 边界**：所有生产头统一经 detail/libuv.hpp 导入，Windows 提前定义 NOMINMAX /
+  WIN32_LEAN_AND_MEAN；numeric_limits::max 使用括号避免已有 Windows 宏污染。
+
 ## 8. 待定问题
 
 - uvco core 依赖 co2 的若干 `detail` 接口：`TaskAccess`（启动 Task / 取结果）、`stopTokenOf`
@@ -488,8 +533,10 @@ co2::whenAll 的 API、Result 作为值的语义、依赖源码均不改变。
 - 尚未提供 install / export 规则（目前只支持 `add_subdirectory` / FetchContent 方式使用）。
 
 - DNS 暂无缓存、Happy Eyeballs、resolver 注入；Work 不强制中断，取消不撤销副作用。
-- 待扩展：capture/BufferedReader、目录迭代、socket 选项、Signal/TTY/fs_event/fs_poll；
-  本轮未更改 Process reap-on-destruct 或可能阻塞 Loop 析构的策略。
+- P2 已增加 capture/BufferedReader、目录迭代、UDP multicast 选项、listener 门面与 yieldNextTurn；
+  待扩展 Signal/TTY/fs_event/fs_poll。未更改 Process reap-on-destruct 或可能阻塞 Loop 析构的策略。
+- capture 不保留错误时部分输出，无信号升级/跨平台 process-tree 后端；POSIX leader 已回收后
+  不再寻址旧 PGID。BufferedReader cap 不是硬 allocator 限额；Dir close 是同步清理。
 
 ## 9. 与原设计的偏差（实现 core 时记录）
 
@@ -671,3 +718,24 @@ TSan 20 遍，总计 1080 次 CTest 执行全部通过；所有公共头单独�
 DNS Linux fault fixture 使用 wrap new 调用而不是覆盖全局 new/delete，避免与 TSan 的
 强符号 allocator interceptor 冲突，不禁用 sanitizer。build-only mutation 检查分别移除
 addrinfo guard、破坏 all 的 stop-on-success 策略，两组回归均以断言失败拒绝错误实现。
+
+### P2 比对建议落地（2026-11-07）
+
+- 仅合并 whenAny range 的固定 Entry 存储，明确没有采用 winner-only extraction。
+- capture/communicate 采用 free function + 现有 Pipe/Process，独立输出 cap 和显式取消选项；
+  不引入 kotatsu 的原生 process watcher/job 后端，不改变默认回收语义。
+- BufferedReader 保留为独立借用适配器；fd adoption 失败所有权、readLine EOF/cap 语义明确。
+- Dir 复用 FsOp 的 cleanup/release 与新增 completed hook，close 跟随 File 的同步 RAII 风格。
+- yieldNextTurn 使用内嵌 check/idle 两阶段保证，不修改 Loop 的 schedule 队列或其他恢复策略。
+- UDP 仅增加选项/指标，listener 仅增加类型门面；集中 libuv import 不提高 C++14/libuv 版本下限。
+
+P2 最终验证（Linux）：38 个 CTest；g++ / clang++ 各 5 遍，ASan/UBSan（含 leak detection）
+10 遍，TSan 20 遍，共 1520 次全绿；全部公共头独立编译，四构建无警告。
+新增目录 fault fixture 验证迟到取消/投影异常关闭资源且不重复释放；capture fixture 在输出
+append 边界注入 bad_alloc / 其他异常，断言向调用者重抛前直接子进程 handle 已关闭。
+后者只在 Linux + libstdc++ C++11 ABI 注册，关闭该 fixture 的内联以固定注入边界；
+不替换 sanitizer allocator、不关闭 sanitizer。普通 capture 测试不受此 ABI 限制。
+仅 build/ 副本的 mutation 验证：用 P1 whenAny 实现时固定分配断言失败；移除 capture join
+异常暂存/异步回收时“重抛前 process handle 为零”断言失败，当前实现通过。
+验证日志为 build/p2-final-*-{build,test}.log；mutation 证据在 build/review/p2-*-proof/。
+Windows/macOS 未运行验证；没有新增信号升级、硬内存预算或异步 closedir 承诺。

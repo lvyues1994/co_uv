@@ -103,3 +103,44 @@ ASan/UBSan + leak detection 重复 10 遍，TSan 重复 20 遍通过。
 新增 allResults、DNS、Work、WaitSlot 用例覆盖错误/取消/异常/并发与资源释放；Linux DNS
 故障注入通过 linker wrap 保留 sanitizer 的 allocator interceptor，不关闭 sanitizer。
 尚未验证 Windows/macOS；install/export、DNS 缓存/Happy Eyeballs、强制中断 worker 均不在本轮范围。
+
+## P2：可选适配器与扩展
+
+- `capture(loop, ProcessOptions, CaptureOptions)` / `communicate(...)`：同时写 stdin、读 stdout/stderr、
+  等待退出，返回 `Result<CaptureResult>`（status/stdoutData/stderrData）。input 按值持有；
+  stdoutLimit/stderrLimit 默认各 1 MiB，超过返回 ENOBUFS，不交付部分输出。
+  `CaptureCancel::{stopWaiting,killChild,killGroup}` 默认为 stopWaiting：关闭本次 stdio、取消等待，
+  子进程继续交给既有后台 reaper；kill 模式发送 killSignal（默认 SIGTERM），再等直接子进程回收。
+  POSIX group 模式自动设置 detached 创建新 session/group；Windows 返回 ENOSYS。
+  已回收 leader 不再寻址旧 PGID，避免误伤复用的标识；因此不保证清理 leader 退出后的后代。
+  不提供信号升级，忽略 killSignal 的子进程仍可能阻塞；需要强制终止时显式选 SIGKILL（平台支持时）。
+- `<uvco/stream.hpp>` 的 `BufferedReader<Stream>` 为可选适配层：
+  `readExactly(n)`、`readLine(maxLength)`、`readToEnd(maxBytes)` 都返回 `Result<string>`。
+  readLine 不含 LF、保留 CR，EOF 交付末尾未换行行，再返回 eof；exact 短 EOF、取消或 cap 错误
+  保留未消费缓冲，可以用更大的 cap 重试。内部最多一次额外 4096 字节 read-ahead；
+  cap 是输出限制，不是全局 allocator/缓冲容量限额。reader/stream 必须活过操作，不得并发或绕过 reader 直接读。
+- `Tcp::open(loop, uv_os_sock_t)` / `Pipe::open(loop, uv_file)`：成功才移交 fd 所有权；失败由调用者
+  保留并关闭。调用者须保证描述符类型正确、且未被其他 handle 拥有；libuv 不一定拒绝错误类型或
+  非活跃句柄重复接管。失败不承诺恢复 nonblocking 等 flags。
+- `TcpListener` / `PipeListener`：仅 bind/listen/accept/close 与本地地址查询的薄门面；accept 仍返回 Tcp/Pipe。
+  旧 Tcp/Pipe API、控制块和零缓冲 stream core 不变。
+- `fs::openDir(loop,path)` → `Result<fs::Dir>`；`dir.readDir(batch=64)` / `fs::readDir(dir,batch)`
+  每次复制最多 batch 条（1..64），空 vector 表示结束。Dir 最后一个 lease 析构同步 closedir，
+  `dir.close()` 也同步、不可取消，要求没有在途 read。未启动操作保活状态；显式 close 后它们返回 EBADF。
+  openDir 复用 FsOp 的迟到取消释放；readDir 消耗游标，迟到取消仍交付真实读取结果，不能回滚游标。
+- `yieldNextTurn(loop)` → `Result<void>`：跨至少一个完整 libuv iteration，任意调用 phase 都成立；
+  支持取消和 Loop teardown（aborted），不改变 `scheduleOn(loop)`。
+- UDP 新增 multicast/source membership、loop/TTL/interface 与 sendQueueSize/Count；
+  选项和不支持平台错误透传 libuv，不增加接收队列或改变 UDP 完成策略。
+
+whenAny range 现在仅用一个固定 Entry 数组保存 slot/end/exception/child，加原有 Task vector；
+仍收集每个分支，loser 的 throwing move 继续传播，**没有做只提取赢家的语义修改**。
+libuv 导入集中到内部 detail/libuv.hpp，加入 Windows guards 和 macro-resistant numeric_limits 写法；
+这不等于已经完成 Windows/macOS 运行验证。
+
+P2 验证（Linux）：38 个 CTest，g++ / clang++ 各重复 5 遍，ASan/UBSan + leak detection
+重复 10 遍，TSan 重复 20 遍，共 1520 次全部通过；全部公共头独立编译通过。
+新增覆盖双输出并发 + 大 stdin、独立 cap、pending write 取消、输出异常 drain/reap、
+BufferedReader 取消重试、fd adoption 成败/占用冲突、目录 lease/迟到取消/投影异常、
+yield 五种 phase/预取消/Loop teardown、UDP 选项与 listener。
+构建与测试日志位于 `build/p2-final-{gcc,clang,asan,tsan}-*.log`。
