@@ -22,15 +22,18 @@ template<class Stream> class BufferedReader {
     BufferedReader& operator=(BufferedReader const&)=delete;
     ~BufferedReader(){UVCO_CONTRACT_CHECK(!busy_);}
     auto readExactly(std::size_t size) {return readExactlyTask(*this,size);}
+  private:
     static auto readExactlyTask(BufferedReader& self,std::size_t size) CO2_BEG(co2::Task<Result<std::string>>,(self,size),Lease lease;Result<void> r;) {
         lease.acquire(self);
         while(self.available()<size && !self.eof_){CO2_AWAIT_SET(r,self.fill());if(!r)CO2_RETURN(lease.finish(r.error()));}
         if(self.available()<size)CO2_RETURN(lease.finish(Errc::eof));
         CO2_RETURN(lease.finish(self.take(size,0)));
     } CO2_END
+  public:
     // Delimiter excluded, CR is preserved; EOF returns the final unterminated
     // line, then eof. maxLength counts bytes excluding '\n'.
     auto readLine(std::size_t maxLength) {return readLineTask(*this,maxLength);}
+  private:
     static auto readLineTask(BufferedReader& self,std::size_t maxLength) CO2_BEG(co2::Task<Result<std::string>>,(self,maxLength),Lease lease;Result<void> r;std::size_t end=0;) {
         lease.acquire(self);
         for(;;){
@@ -44,7 +47,9 @@ template<class Stream> class BufferedReader {
             CO2_AWAIT_SET(r,self.fill());if(!r)CO2_RETURN(lease.finish(r.error()));
         }
     } CO2_END
+  public:
     auto readToEnd(std::size_t maxBytes) {return readToEndTask(*this,maxBytes);}
+  private:
     static auto readToEndTask(BufferedReader& self,std::size_t maxBytes) CO2_BEG(co2::Task<Result<std::string>>,(self,maxBytes),Lease lease;Result<void> r;) {
         lease.acquire(self);
         for(;;){
@@ -53,6 +58,7 @@ template<class Stream> class BufferedReader {
             CO2_AWAIT_SET(r,self.fill());if(!r)CO2_RETURN(lease.finish(r.error()));
         }
     } CO2_END
+  public:
     std::size_t bufferedBytes() const noexcept{return available();}
   private:
     std::size_t available() const noexcept{return data_.size()-offset_;}
