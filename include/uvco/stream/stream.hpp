@@ -428,7 +428,8 @@ class WriteAwaiter {
         bufs[first].base += written;
         bufs[first].len = static_cast<UvBufLen>(bufs[first].len - written);
 
-        req_ = new Req{};
+        try { req_ = new Req{}; }
+        catch (...) { if (tried > 0) block_->closeInternally(); throw; }
         req_->req.data = req_;
         req_->waiter = waiting;
         req_->self = this;
@@ -437,6 +438,7 @@ class WriteAwaiter {
         if (status < 0) {
             delete std::exchange(req_, nullptr);
             status_ = status;
+            if (tried > 0) block_->closeInternally();
             return false;
         }
         req_->pending = true;
@@ -455,6 +457,7 @@ class WriteAwaiter {
         Req* const r = static_cast<Req*>(req->data);
         r->pending = false;
         r->self->status_ = r->self->canceled_ ? UV_ECANCELED : (status == UV_ECANCELED ? UVCO_EABORTED : status);
+        if (status < 0) r->self->block_->closeInternally(); // queued write may have emitted a prefix
         r->waiter.resume(); // libuv 回调里内联恢复
     }
 
