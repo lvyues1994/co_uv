@@ -20,12 +20,60 @@ cmake --preset debug-gcc   && cmake --build --preset debug-gcc   && ctest --pres
 cmake --preset debug-clang && cmake --build --preset debug-clang && ctest --preset debug-clang
 ```
 
-在其他项目中使用：
+## 在其他项目中使用
+
+### 源码集成
 
 ```cmake
-add_subdirectory(uvco)          # 或 FetchContent
+add_subdirectory(uvco)          # 或 FetchContent_MakeAvailable(uvco)
 target_link_libraries(app PRIVATE uvco::uvco)
 ```
+
+主项目默认开启 `UVCO_BUILD_TESTS` / `UVCO_ENABLE_INSTALL`；作为子项目两者默认关闭，
+可显式开启。保留 CMake 3.14 下限（旧版本使用 top-level 判定兼容分支）。
+
+### 安装包
+
+所有安装路径由 GNUInstallDirs 控制。下面的示例只写入项目 `build/`：
+
+```sh
+cmake -S . -B build/package -DUVCO_BUILD_TESTS=OFF \
+  -DCMAKE_INSTALL_PREFIX="$PWD/build/prefix"
+cmake --build build/package
+cmake --install build/package
+# 仅当 co2 是本次 FetchContent 引入时，单独安装它：
+cmake --install build/package/_deps/co2-build --prefix "$PWD/build/deps"
+```
+
+`cmake --install` 需 CMake ≥3.15；3.14 可改用
+`cmake -DCMAKE_INSTALL_PREFIX="$PWD/build/prefix" -P build/package/cmake_install.cmake`。
+消费者的 CMakeLists.txt：
+
+```cmake
+find_package(uvco 0.1 CONFIG REQUIRED)
+target_link_libraries(app PRIVATE uvco::uvco)
+```
+
+通过 `CMAKE_PREFIX_PATH` 指定 uvco/co2 安装前缀。例如运行项目附带的两 TU 消费者：
+
+```sh
+cmake -S tests/consumer -B build/consumer \
+  -DCMAKE_PREFIX_PATH="$PWD/build/prefix;$PWD/build/deps"
+cmake --build build/consumer
+(cd build/consumer && ctest --output-on-failure)
+```
+
+依赖和兼容性决策：
+- uvco 只安装自己的头文件与 CMake 包，不捆绑或自动安装 FetchContent 依赖。
+  消费时必须已有可被 `find_package(co2 CONFIG)` 找到的 co2；预览版不传数字版本，
+  在消费者配置阶段重新编译探测 co2 内部能力。
+- 构建时通过 libuv CMake 包/父目标发现的依赖，安装包消费端使用 `find_dependency(libuv CONFIG)`；
+  通过 pkg-config 发现的则寻找 PkgConfig 与 `libuv>=1.40`。所有路径都编译检查实际头文件版本。
+  FetchContent libuv 的安装包消费者要求另行安装 libuv CMake 包；不在消费端自动下载。
+- 版本文件采用 `SameMinorVersion`：0.x 不承诺跨 minor 兼容，同 minor 的 patch 遵循 CMake 版本规则。
+  包可搬迁；目标不会记录原源码/构建目录。`uvco::uvco` 在源码和安装模式下名称一致。
+- 非 imported 的源目标探测支持普通/BUILD_INTERFACE include 及传递依赖；复杂 generator expression
+  会明确拒绝，避免误用系统头文件，需改用依赖的 installed/imported target。
 
 ## 示例
 
@@ -102,7 +150,7 @@ P1 最新验证：27 个 CTest 项（含公共头独立包含构建），g++/cla
 ASan/UBSan + leak detection 重复 10 遍，TSan 重复 20 遍通过。
 新增 allResults、DNS、Work、WaitSlot 用例覆盖错误/取消/异常/并发与资源释放；Linux DNS
 故障注入通过 linker wrap 保留 sanitizer 的 allocator interceptor，不关闭 sanitizer。
-尚未验证 Windows/macOS；install/export、DNS 缓存/Happy Eyeballs、强制中断 worker 均不在本轮范围。
+P1 当时未覆盖 install/export（现已完成，见使用章节）；Windows/macOS、DNS 缓存/Happy Eyeballs、强制中断 worker 仍未覆盖。
 
 ## P2：可选适配器与扩展
 
@@ -144,3 +192,8 @@ P2 验证（Linux）：38 个 CTest，g++ / clang++ 各重复 5 遍，ASan/UBSan
 BufferedReader 取消重试、fd adoption 成败/占用冲突、目录 lease/迟到取消/投影异常、
 yield 五种 phase/预取消/Loop teardown、UDP 选项与 listener。
 构建与测试日志位于 `build/p2-final-{gcc,clang,asan,tsan}-*.log`。
+
+install/export 最新验证（Linux）：40 个 CTest 在 g++、clang++、ASan/UBSan（含 leak detection）、
+TSan 四构建各重复 2 遍，共 320 次全部通过；安装/源码消费者也继承对应 sanitizer flags。
+额外通过 CMake 3.28 的安装与两 TU 消费者测试；主验证使用 CMake 4.4。
+日志见 `build/install-{gcc,clang,asan,tsan}-*.log`；CMake 3.14、Windows/macOS 和多配置生成器未实机验证。

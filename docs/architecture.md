@@ -500,6 +500,13 @@ openDir 的投影异常/迟到取消同步 closedir；readDir 只消耗游标，
 - **libuv 边界**：所有生产头统一经 detail/libuv.hpp 导入，Windows 提前定义 NOMINMAX /
   WIN32_LEAN_AND_MEAN；numeric_limits::max 使用括号避免已有 Windows 宏污染。
 
+- **安装边界**：BUILD_INTERFACE 使用源码依赖，INSTALL_INTERFACE 仅引用包内导入的 dependency bridge。
+  导出 uvco::uvco，不导出/安装源码依赖目标；FetchContent 子目录 EXCLUDE_FROM_ALL 防止自动附带安装。
+  消费端 co2 总是 find_dependency(CONFIG)；libuv 记住 CMake/pkg-config provider，FetchContent 对应独立 CMake 包。
+- **包兼容性**：0.x 使用 SameMinorVersion、ARCH_INDEPENDENT（本库为纯头文件），不承诺跨 minor 兼容。
+  source 与 installed config 复用 co2 能力/真实 libuv >=1.40 头文件编译探测；不运行探测程序。
+  parent 源 target 传递 usage 显式收集；不能求值的复杂 source generator expression 拒绝而不是误验系统头。
+
 ## 8. 待定问题
 
 - uvco core 依赖 co2 的若干 `detail` 接口：`TaskAccess`（启动 Task / 取结果）、`stopTokenOf`
@@ -530,7 +537,9 @@ openDir 的投影异常/迟到取消同步 closedir；readDir 只消耗游标，
 - 远程投递（`schedule` / `post`）的线程若既不在 `run()` 期间、也不持有 `KeepAlive`，与 `drain()` /
   `~Loop` 竞争（`~Loop` 发现未处理的远程工作即契约违规）。
 - 保活释放竞争测试依赖 GNU ld / lld 的 `--wrap`，只在 Linux 上构建。
-- 尚未提供 install / export 规则（目前只支持 `add_subdirectory` / FetchContent 方式使用）。
+- install/export 已完成：GNUInstallDirs、uvco::uvco、可搬迁 Config/Version；依赖不捆绑，消费者重新校验。
+  Windows/macOS、多配置生成器与 CMake 3.14 实机验证尚待补充；非 imported 源目标复杂 generator expression
+  会明确拒绝，推荐使用依赖的 installed/imported target。
 
 - DNS 暂无缓存、Happy Eyeballs、resolver 注入；Work 不强制中断，取消不撤销副作用。
 - P2 已增加 capture/BufferedReader、目录迭代、UDP multicast 选项、listener 门面与 yieldNextTurn；
@@ -667,7 +676,7 @@ openDir 的投影异常/迟到取消同步 closedir；readDir 只消耗游标，
   helper 作为子进程夹具关闭 sanitizer 插桩，库与父测试仍全量插桩，避免重复加载运行时和信号终止夹具的干扰。
 - co2 内部依赖集中 compat，并在配置时能力探测；构造不兼容的本地 co2 fixture 已验证配置拒绝。
 - timeout 计时断言改为结果/取消/清理语义断言，运行时间由 CTest timeout 限制。
-- whenAny throwing move 已在后续修复（见下）；尚未解决 all/any 上游统一、install/export；
+- whenAny throwing move 已在后续修复（见下）；当时尚未解决 all/any 上游统一、install/export（后者现已完成，见后文）；
   Windows/macOS 仅代码分层，未实机验证。
 
 
@@ -739,3 +748,31 @@ append 边界注入 bad_alloc / 其他异常，断言向调用者重抛前直接
 异常暂存/异步回收时“重抛前 process handle 为零”断言失败，当前实现通过。
 验证日志为 build/p2-final-*-{build,test}.log；mutation 证据在 build/review/p2-*-proof/。
 Windows/macOS 未运行验证；没有新增信号升级、硬内存预算或异步 closedir 承诺。
+
+### install/export 落地（2026-11-07）
+
+保留 CMake 3.14/C++14 下限；PROJECT_IS_TOP_LEVEL 在旧 CMake 上回退到目录比较。
+UVCO_BUILD_TESTS / UVCO_ENABLE_INSTALL 顶层默认 ON、子项目默认 OFF，可由调用方显式选择。
+GNUInstallDirs 控制 include/lib/cmake；标准 component 名 uvco。包同时提供 Config 与
+SameMinorVersion Version；find_dependency 不联网抓源码。FetchContent 依赖只用于构建，
+可从其自身 binary dir 单独安装，不由 uvco 的 install 隐式捆绑。
+
+导出目标不含构建/源码绝对路径。Config 在嵌套 find_dependency 前捕获自身 include 前缀，
+避免 CMake <3.30 的 PACKAGE_PREFIX_DIR 被依赖覆盖。co2 预览版本无数字请求，消费端重做能力探测；
+libuv CMake/parent、pkg-config、FetchContent 路径均验证实际头文件 >=1.40，provider 记录在 Config。
+source target 的普通/BUILD_INTERFACE 及传递 target usage 可探测；复杂表达式报出诊断要求 imported 依赖，
+而非默默忽略后用另一套系统头通过检查。不改变运行时错误、取消或恢复语义。
+
+新增 package-tests：安装后搬迁前缀，find_package、add_subdirectory、local FetchContent 三种消费方式，
+全部编译/链接/运行两个 TU；确认子项目默认不安装、无源码路径泄露、无依赖捆绑。
+dependency-tests 用本机真实 libuv 构建 CMake 元数据/本地 source fixture，覆盖 CMake/pkg-config/fetched
+provider、co2 不兼容、旧实际头文件（含 metadata 虚报高版本）、0.x 跨 minor 请求拒绝，
+以及 parent wrapper 传递 include 与复杂 generator expression 的显式拒绝。
+
+最终验证：Linux / CMake 4.4，40 个 CTest 在 g++、clang++、ASan/UBSan（leak detection）、TSan
+四构建各重复 2 遍，共 320 次全部通过，公共头独立编译通过，四构建无警告。
+外部消费者传递同一编译器与 sanitizer flags，均实际 configure/build/link/run。
+另用 CMake 3.28 配置、安装、构建并运行独立两 TU 消费者，覆盖嵌套依赖改变前缀的兼容路径。
+CMake 3.14 的命令兼容性保留但未实机运行；Windows/macOS、多配置生成器同样尚待验证。
+红/绿证据：build/install-red.log 为原版无安装产物失败；build/install-transitive-red.log 为
+原先 parent wrapper 传递旧头文件被误接受的回归，修复后通过。最终日志 build/install-*-{config,build,test}.log。
