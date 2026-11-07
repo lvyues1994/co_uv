@@ -241,6 +241,7 @@ inline Result<Process> spawn(Loop& loop, ProcessOptions options) {
     auto* b = new detail::ProcessBlock{loop};
     int const status = b->start(raw);
     if (status < 0) {
+        b->closeInternally(); // no child exists, hence no exit callback to await
         static_cast<void>(b->release({}));
         return static_cast<Errc>(status);
     }
