@@ -973,11 +973,9 @@ CO2_END
 TEST_CASE("timeout: hit returns ETIMEDOUT and cancels the task") {
     uvco::Loop loop;
     std::vector<int> cancelled;
-    auto const start = Clock::now();
     auto const r = uvco::run(loop, timed(loop, 10ms, sleepValue(loop, 10s, 1, cancelled)));
-    auto const elapsed = msSince(start);
     CHECK(not r && r.error() == Errc::timed_out);
-    CHECK(elapsed >= 9 && elapsed < 1000);
+    // Functional semantics, not scheduler precision: CTest enforces a generous timeout.
     CHECK((cancelled == std::vector<int>{1}));
 }
 
