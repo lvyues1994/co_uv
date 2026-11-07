@@ -5,15 +5,13 @@
 #include "test.hpp"
 #include "uvco/uvco.hpp"
 namespace {int fault=0;int frees=0;co2::stop_source* stop=nullptr;uv_getaddrinfo_cb next=nullptr;}
-void* operator new(std::size_t size) {
+extern "C" void* UVCO_TEST_REAL_NEW(std::size_t);
+extern "C" void* UVCO_TEST_WRAP_NEW(std::size_t size) {
  int const mode=fault;fault=0;
  if(mode==1)throw std::bad_alloc{};
  if(mode==2)throw std::runtime_error{"projection"};
- if(void* p=std::malloc(size?size:1))return p;
- throw std::bad_alloc{};
+ return UVCO_TEST_REAL_NEW(size);
 }
-void operator delete(void* p) noexcept {std::free(p);}
-void operator delete(void* p,std::size_t) noexcept {std::free(p);}
 extern "C" int __real_uv_getaddrinfo(uv_loop_t*,uv_getaddrinfo_t*,uv_getaddrinfo_cb,char const*,char const*,addrinfo const*);
 extern "C" void __real_uv_freeaddrinfo(addrinfo*);
 namespace {

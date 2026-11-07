@@ -91,7 +91,19 @@ target_compile_definitions(uvco-process-portable-tests PRIVATE
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(uvco-dns-fault-tests dns_fault_tests.cpp)
     uvco_configure_test(uvco-dns-fault-tests)
-    target_link_options(uvco-dns-fault-tests PRIVATE "-Wl,--wrap=uv_getaddrinfo" "-Wl,--wrap=uv_freeaddrinfo")
+    # Wrap allocation calls instead of replacing global new/delete: TSan owns
+    # strong new/delete interceptors. Keep the allocator itself instrumented.
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        set(_uvco_new_symbol _Znwm)
+    else()
+        set(_uvco_new_symbol _Znwj)
+    endif()
+    target_compile_definitions(uvco-dns-fault-tests PRIVATE
+        UVCO_TEST_REAL_NEW=__real_${_uvco_new_symbol}
+        UVCO_TEST_WRAP_NEW=__wrap_${_uvco_new_symbol})
+    target_link_options(uvco-dns-fault-tests PRIVATE
+        "-Wl,--wrap=uv_getaddrinfo" "-Wl,--wrap=uv_freeaddrinfo" "-Wl,--wrap=${_uvco_new_symbol}")
+    unset(_uvco_new_symbol)
     add_test(NAME uvco-dns-fault-tests COMMAND uvco-dns-fault-tests)
 endif()
 
