@@ -11,6 +11,8 @@
 #include <co2/stop_token.hpp>
 #include "uvco/detail/libuv.hpp"
 
+#include "uvco/detail/watcher/event_port.hpp"
+#include "uvco/detail/watcher/native.hpp"
 #include "uvco/core/cancel.hpp"
 #include "uvco/core/wait_slot.hpp"
 #include "uvco/core/config.hpp"
@@ -49,96 +51,40 @@ inline std::uint64_t toMilliseconds(std::chrono::milliseconds const duration) no
     return static_cast<std::uint64_t>(duration.count());
 }
 
-class TimerBlock final : public HandleBlock {
+struct TimerBackend {
+    using Handle = uv_timer_t;
+    static int init(uv_loop_t* l, Handle* h) noexcept { return uv_timer_init(l, h); }
+    static int start(Handle* h, uv_timer_cb cb, std::uint64_t timeout, std::uint64_t repeat) noexcept {
+        return uv_timer_start(h, cb, timeout, repeat);
+    }
+    static int stop(Handle* h) noexcept { return uv_timer_stop(h); }
+};
+using TimerPort = watcher::EventPort<std::uint64_t, watcher::LegacyTimerCount,
+    watcher::InlineNative, watcher::LegacyTimerRules>;
+class TimerBlock final : public watcher::NativeWatcherBlock<TimerBackend, TimerPort> {
+    using Base = watcher::NativeWatcherBlock<TimerBackend, TimerPort>;
   public:
-    explicit TimerBlock(Loop& loop) noexcept : HandleBlock{loop} {
-        int const status = uv_timer_init(loop.raw(), &timer_);
+    explicit TimerBlock(Loop& loop) noexcept : Base{loop} {
+        int const status = init();
         UVCO_CONTRACT_CHECK(status == 0);
-        bindHandle();
     }
-
-    uv_timer_t* raw() noexcept { return &timer_; }
-
-    Result<void> start(std::uint64_t const timeout, std::uint64_t const repeat) noexcept {
-        expirations_ = 0;
-        uv_update_time(loop().raw()); // 从调用时刻起算（见 sleep.hpp）
-        return fromStatus(uv_timer_start(&timer_, &TimerBlock::onTimer, timeout, repeat));
+    Result<void> start(std::uint64_t timeout, std::uint64_t repeat) noexcept {
+        clearBuffer(); // restart does not abort an existing tick
+        uv_update_time(loop().raw());
+        return fromStatus(startNative(&TimerBlock::onTimer, timeout, repeat));
     }
-
     void stop() noexcept {
-        static_cast<void>(uv_timer_stop(&timer_));
-        expirations_ = 0;
-        if (slot_.pending()) finishTick(UVCO_EABORTED, Resume::later);
+        static_cast<void>(stopNative());
+        stopDelivery(); // user-side completion remains deferred
     }
-
-    // ---- tick() awaiter ----
-
-    bool suspendTick(co2::coroutine_handle<> const waiter, co2::stop_token token) {
-        UVCO_CONTRACT_CHECK(loop().isLoopThread());
-        UVCO_CONTRACT_CHECK(slot_.idle()); // 一次只能有一个 tick() 等待
-        slot_.begin();
-        if (token.stop_requested()) {
-            slot_.set(Errc::canceled);
-            return false;
-        }
-        if (expirations_ != 0) {
-            slot_.set(std::exchange(expirations_, 0));
-            return false;
-        }
-        if (uv_is_active(reinterpret_cast<uv_handle_t const*>(&timer_)) == 0) {
-            slot_.set(Errc::invalid_argument); // 未启动：永远不会到期
-            return false;
-        }
-        slot_.pend(waiter);
-        opBegin();
-        cancel_.arm(loop(), std::move(token), &TimerBlock::onCancel, this);
-        return true;
+    bool suspendTick(co2::coroutine_handle<> waiter, co2::stop_token token) {
+        return suspendNext(waiter, std::move(token));
     }
-
-    Result<std::uint64_t> resumeTick() noexcept {
-        cancel_.disarm();
-        auto taken = slot_.take();
-        if (taken.suspended) opEnd(); // no this access afterwards
-        return std::move(taken.result);
-    }
-
+    Result<std::uint64_t> resumeTick() noexcept { return resumeNext(); }
   private:
-    enum class Resume : unsigned char { inlineNow, later };
-
-    uv_handle_t* uvHandle() noexcept override { return reinterpret_cast<uv_handle_t*>(&timer_); }
-
-    void abortPending() noexcept override {
-        if (slot_.pending()) finishTick(UVCO_EABORTED, Resume::later);
+    static void onTimer(uv_timer_t* timer) noexcept {
+        fromData<TimerBlock>(timer->data).publish(std::uint64_t{1}); // no access after resume
     }
-
-    static void onTimer(uv_timer_t* const timer) noexcept {
-        auto& self = fromData<TimerBlock>(timer->data);
-        ++self.expirations_;
-        if (self.slot_.pending()) {
-            self.finishTick(0, Resume::inlineNow); // 之后不再访问 self
-        }
-    }
-
-    static void onCancel(void* const context) {
-        auto* const self = static_cast<TimerBlock*>(context);
-        if (self->slot_.pending()) self->finishTick(UV_ECANCELED, Resume::inlineNow);
-    }
-
-    void finishTick(int const status, Resume const how) noexcept {
-        Result<std::uint64_t> result = status < 0
-            ? Result<std::uint64_t>{static_cast<Errc>(status)}
-            : Result<std::uint64_t>{std::exchange(expirations_, 0)};
-        auto const waiter = slot_.complete(std::move(result));
-        if (how == Resume::later)
-            resumeLater(waiter);
-        else
-            waiter.resume();
-    }
-
-    uv_timer_t timer_{};
-    std::uint64_t expirations_ = 0;
-    WaitSlot<std::uint64_t> slot_;
-    CancelHook cancel_;
 };
 
 class TickAwaiter {
@@ -189,6 +135,7 @@ class Timer : public detail::Handle<detail::TimerBlock> {
     }
 
     UVCO_NODISCARD detail::TickAwaiter tick() noexcept { return detail::TickAwaiter{block()}; }
+    UVCO_NODISCARD detail::TickAwaiter next() noexcept { return tick(); }
 };
 
 } // namespace uvco
