@@ -1,0 +1,93 @@
+# Exercise both metadata providers with real native libuv and negative header
+# fixtures. No network or dependency source modification is needed.
+set(work "@PROJECT_BINARY_DIR@/dependency-tests")
+file(REMOVE_RECURSE "${work}")
+file(MAKE_DIRECTORY "${work}/valid/lib/cmake/libuv" "${work}/old/include/uv" "${work}/bad-co2/include/co2")
+function(run)
+    execute_process(COMMAND ${ARGV} RESULT_VARIABLE status OUTPUT_VARIABLE out ERROR_VARIABLE err)
+    if(NOT status EQUAL 0)
+        message(FATAL_ERROR "Command: ${ARGV}\n${out}\n${err}")
+    endif()
+endfunction()
+function(reject diagnostic)
+    execute_process(COMMAND ${ARGN} RESULT_VARIABLE status OUTPUT_VARIABLE out ERROR_VARIABLE err)
+    if(status EQUAL 0 OR NOT "${out}\n${err}" MATCHES "${diagnostic}")
+        message(FATAL_ERROR "Expected rejection (${diagnostic}): ${ARGN}\n${out}\n${err}")
+    endif()
+endfunction()
+set(deps "${work}/deps")
+if(NOT "@co2_BINARY_DIR@" STREQUAL "")
+    run("@CMAKE_COMMAND@" --install "@co2_BINARY_DIR@" --prefix "${deps}" --config "${CONFIG}")
+endif()
+file(WRITE "${work}/valid/lib/cmake/libuv/libuvConfig.cmake"
+    "add_library(libuv::uv INTERFACE IMPORTED)\nset_target_properties(libuv::uv PROPERTIES INTERFACE_LINK_LIBRARIES \"@UVCO_LIBUV_LINK_LIBRARIES@\" INTERFACE_INCLUDE_DIRECTORIES \"@UVCO_LIBUV_INCLUDE_DIRS@\")\n")
+file(WRITE "${work}/old/include/uv/version.h" "#define UV_VERSION_HEX ((1 << 16) | (39 << 8))\n")
+file(MAKE_DIRECTORY "${work}/old/lib/cmake/libuv")
+file(WRITE "${work}/old/lib/cmake/libuv/libuvConfig.cmake"
+    "add_library(libuv::uv INTERFACE IMPORTED)\nset_target_properties(libuv::uv PROPERTIES INTERFACE_INCLUDE_DIRECTORIES \"${work}/old/include\")\n")
+set(common -G "@CMAKE_GENERATOR@" "-DCMAKE_C_COMPILER=@CMAKE_C_COMPILER@"
+    "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@" "-DCMAKE_BUILD_TYPE=@CMAKE_BUILD_TYPE@"
+    "-DCMAKE_CXX_FLAGS=@CMAKE_CXX_FLAGS@" "-DCMAKE_EXE_LINKER_FLAGS=@CMAKE_EXE_LINKER_FLAGS@")
+set(prefix "${work}/valid;${deps};@CMAKE_PREFIX_PATH@")
+string(REPLACE ";" "\;" prefix "${prefix}")
+# Installed co2 + libuv CMake-package discovery, followed by package consumption.
+run("@CMAKE_COMMAND@" -S "@PROJECT_SOURCE_DIR@" -B "${work}/cmake-provider" ${common}
+    "-DCMAKE_PREFIX_PATH=${prefix}" -DUVCO_BUILD_TESTS=OFF -DUVCO_ENABLE_INSTALL=ON)
+run("@CMAKE_COMMAND@" --install "${work}/cmake-provider" --prefix "${work}/stage" --config "${CONFIG}")
+set(consumer_prefix "${work}/stage;${work}/valid;${deps};@CMAKE_PREFIX_PATH@")
+string(REPLACE ";" "\;" consumer_prefix "${consumer_prefix}")
+run("@CMAKE_COMMAND@" -S "@PROJECT_SOURCE_DIR@/tests/consumer" -B "${work}/cmake-consumer" ${common}
+    "-DCMAKE_PREFIX_PATH=${consumer_prefix}")
+run("@CMAKE_COMMAND@" --build "${work}/cmake-consumer" --config "${CONFIG}" --parallel 2)
+run("@CMAKE_CTEST_COMMAND@" --test-dir "${work}/cmake-consumer" -C "${CONFIG}" --output-on-failure)
+# Old headers must be rejected even when the CMake package declares no version.
+reject("requires libuv >= 1.40" "@CMAKE_COMMAND@" -S "@PROJECT_SOURCE_DIR@" -B "${work}/old-source" ${common}
+    "-DCMAKE_PREFIX_PATH=${prefix}" "-Dlibuv_DIR=${work}/old/lib/cmake/libuv" -DUVCO_BUILD_TESTS=OFF -DUVCO_ENABLE_INSTALL=OFF)
+reject("libuv headers < 1.40" "@CMAKE_COMMAND@" -S "@PROJECT_SOURCE_DIR@/tests/consumer" -B "${work}/old-consumer" ${common}
+    "-DCMAKE_PREFIX_PATH=${consumer_prefix}" "-Dlibuv_DIR=${work}/old/lib/cmake/libuv")
+# Capability checks must execute in installed consumers, not just the producer.
+file(WRITE "${work}/bad-co2/include/co2/coroutine.hpp" "#error Intentional incompatible co2 fixture\n")
+file(WRITE "${work}/bad-co2/co2Config.cmake"
+    "add_library(co2::co2 INTERFACE IMPORTED)\nset_target_properties(co2::co2 PROPERTIES INTERFACE_INCLUDE_DIRECTORIES \"${work}/bad-co2/include\")\n")
+reject("Incompatible co2" "@CMAKE_COMMAND@" -S "@PROJECT_SOURCE_DIR@/tests/consumer" -B "${work}/bad-co2-consumer" ${common}
+    "-DCMAKE_PREFIX_PATH=${consumer_prefix}" "-Dco2_DIR=${work}/bad-co2")
+# SameMinorVersion must not accept a future 0.x minor.
+file(MAKE_DIRECTORY "${work}/version-source")
+file(WRITE "${work}/version-source/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.14)\nproject(version_test LANGUAGES CXX)\nfind_package(uvco 0.2 CONFIG REQUIRED)\n")
+reject("requested version" "@CMAKE_COMMAND@" -S "${work}/version-source" -B "${work}/version-build" ${common}
+    "-DCMAKE_PREFIX_PATH=${consumer_prefix}")
+# FetchContent-provided libuv target must also be probed. A local source fixture
+# delegates linking to the same real native library; it is not a fake backend.
+file(MAKE_DIRECTORY "${work}/libuv-source")
+file(WRITE "${work}/libuv-source/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.14)\nproject(libuv LANGUAGES C)\nadd_library(uv_a INTERFACE)\nset_target_properties(uv_a PROPERTIES INTERFACE_LINK_LIBRARIES \"@UVCO_LIBUV_LINK_LIBRARIES@\" INTERFACE_INCLUDE_DIRECTORIES \"@UVCO_LIBUV_INCLUDE_DIRS@\")\n")
+set(fetch_prefix "${deps};@CMAKE_PREFIX_PATH@")
+string(REPLACE ";" "\;" fetch_prefix "${fetch_prefix}")
+run("@CMAKE_COMMAND@" -S "@PROJECT_SOURCE_DIR@" -B "${work}/fetch-provider" ${common}
+    "-DCMAKE_PREFIX_PATH=${fetch_prefix}" -DCMAKE_DISABLE_FIND_PACKAGE_libuv=TRUE -DCMAKE_DISABLE_FIND_PACKAGE_PkgConfig=TRUE
+    "-DFETCHCONTENT_SOURCE_DIR_LIBUV=${work}/libuv-source" -DUVCO_BUILD_TESTS=OFF -DUVCO_ENABLE_INSTALL=ON)
+run("@CMAKE_COMMAND@" --install "${work}/fetch-provider" --prefix "${work}/fetch-stage" --config "${CONFIG}")
+
+set(fetch_consumer_prefix "${work}/fetch-stage;${work}/valid;${deps};@CMAKE_PREFIX_PATH@")
+string(REPLACE ";" "\;" fetch_consumer_prefix "${fetch_consumer_prefix}")
+run("@CMAKE_COMMAND@" -S "@PROJECT_SOURCE_DIR@/tests/consumer" -B "${work}/fetch-consumer" ${common}
+    "-DCMAKE_PREFIX_PATH=${fetch_consumer_prefix}")
+run("@CMAKE_COMMAND@" --build "${work}/fetch-consumer" --config "${CONFIG}" --parallel 2)
+run("@CMAKE_CTEST_COMMAND@" --test-dir "${work}/fetch-consumer" -C "${CONFIG}" --output-on-failure)
+file(WRITE "${work}/libuv-source/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.14)\nproject(libuv LANGUAGES C)\nadd_library(uv_a INTERFACE)\nset_target_properties(uv_a PROPERTIES INTERFACE_INCLUDE_DIRECTORIES \"${work}/old/include\")\n")
+reject("requires libuv >= 1.40" "@CMAKE_COMMAND@" -S "@PROJECT_SOURCE_DIR@" -B "${work}/fetch-old-provider" ${common}
+    "-DCMAKE_PREFIX_PATH=${fetch_prefix}" -DCMAKE_DISABLE_FIND_PACKAGE_libuv=TRUE -DCMAKE_DISABLE_FIND_PACKAGE_PkgConfig=TRUE
+    "-DFETCHCONTENT_SOURCE_DIR_LIBUV=${work}/libuv-source" -DUVCO_BUILD_TESTS=OFF -DUVCO_ENABLE_INSTALL=OFF)
+# A pkg-config version claim must not hide mismatched old actual headers.
+file(MAKE_DIRECTORY "${work}/old/lib/pkgconfig")
+string(REPLACE ";" " " libs "@UVCO_LIBUV_LINK_LIBRARIES@")
+file(WRITE "${work}/old/lib/pkgconfig/libuv.pc"
+    "Name: libuv\nDescription: header mismatch fixture\nVersion: 1.48.0\nLibs: ${libs}\nCflags: -I${work}/old/include\n")
+run("@CMAKE_COMMAND@" --install "@PROJECT_BINARY_DIR@" --prefix "${work}/pkg-stage" --component uvco --config "${CONFIG}")
+set(pkg_prefix "${work}/pkg-stage;${deps};@CMAKE_PREFIX_PATH@")
+string(REPLACE ";" "\;" pkg_prefix "${pkg_prefix}")
+reject("libuv headers < 1.40" "@CMAKE_COMMAND@" -E env "PKG_CONFIG_LIBDIR=${work}/old/lib/pkgconfig" "PKG_CONFIG_PATH="
+    "@CMAKE_COMMAND@" -S "@PROJECT_SOURCE_DIR@/tests/consumer" -B "${work}/old-pkg-consumer" ${common}
+    "-DCMAKE_PREFIX_PATH=${pkg_prefix}")

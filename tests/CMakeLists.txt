@@ -179,3 +179,19 @@ int main() {}" UVCO_TEST_GLIBCXX_ABI)
         unset(_uvco_append_symbol)
     endif()
 endif()
+
+if(NOT DEFINED UVCO_ENABLE_INSTALL OR UVCO_ENABLE_INSTALL)
+    configure_file(package_tests.cmake.in package_tests.cmake @ONLY)
+    add_test(NAME uvco-package-tests COMMAND ${CMAKE_COMMAND} -DCONFIG=$<CONFIG>
+        -P ${CMAKE_CURRENT_BINARY_DIR}/package_tests.cmake)
+    set_tests_properties(uvco-package-tests PROPERTIES TIMEOUT 180)
+endif()
+
+# This matrix uses the real pkg-config library to construct CMake metadata and
+# local FetchContent fixtures. Native CMake-only platforms still run package-tests.
+if(UVCO_ENABLE_INSTALL AND UVCO_LIBUV_PROVIDER STREQUAL "pkgconfig")
+    configure_file(dependency_tests.cmake.in dependency_tests.cmake @ONLY)
+    add_test(NAME uvco-dependency-tests COMMAND ${CMAKE_COMMAND} -DCONFIG=$<CONFIG>
+        -P ${CMAKE_CURRENT_BINARY_DIR}/dependency_tests.cmake)
+    set_tests_properties(uvco-dependency-tests PROPERTIES TIMEOUT 180)
+endif()

@@ -4,12 +4,16 @@ project(uvco VERSION 0.1.0 LANGUAGES C CXX)
 
 include(FetchContent)
 
-set(UVCO_BUILD_TESTS_DEFAULT OFF)
-if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
-    set(UVCO_BUILD_TESTS_DEFAULT ON)
+# PROJECT_IS_TOP_LEVEL was introduced in 3.21; retain the 3.14 floor.
+if(CMAKE_VERSION VERSION_LESS 3.21)
+    set(PROJECT_IS_TOP_LEVEL OFF)
+    if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+        set(PROJECT_IS_TOP_LEVEL ON)
+    endif()
 endif()
-option(UVCO_BUILD_TESTS "Build uvco tests" ${UVCO_BUILD_TESTS_DEFAULT})
-unset(UVCO_BUILD_TESTS_DEFAULT)
+option(UVCO_BUILD_TESTS "Build uvco tests" ${PROJECT_IS_TOP_LEVEL})
+option(UVCO_ENABLE_INSTALL "Install/export uvco (installed deps required)" ${PROJECT_IS_TOP_LEVEL})
+include(cmake/uvcoDependencies.cmake)
 
 set(UVCO_CO2_GIT_REPOSITORY "https://github.com/lvyues1994/coro.git"
     CACHE STRING "co2 git repository used when find_package(co2) fails")
@@ -33,42 +37,24 @@ else()
         GIT_REPOSITORY ${UVCO_CO2_GIT_REPOSITORY}
         GIT_TAG ${UVCO_CO2_GIT_TAG})
     FetchContent_MakeAvailable(co2)
+    # Dependencies are not bundled into uvco's install. They can be installed
+    # independently from their own build directories when desired.
+    set_property(DIRECTORY "${co2_SOURCE_DIR}" PROPERTY EXCLUDE_FROM_ALL TRUE)
 endif()
 
-# Capability probe, including installed co2 where a pinned FetchContent commit
-# cannot protect us. Check exact detail hooks instead of a numeric preview version.
-include(CheckCXXSourceCompiles)
-include(CMakePushCheckState)
-cmake_push_check_state(RESET)
-get_target_property(_uvco_co2_includes co2::co2 INTERFACE_INCLUDE_DIRECTORIES)
-set(CMAKE_REQUIRED_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/include")
-foreach(_inc IN LISTS _uvco_co2_includes)
-    if(_inc MATCHES "^\\$<BUILD_INTERFACE:(.*)>$")
-        list(APPEND CMAKE_REQUIRED_INCLUDES "${CMAKE_MATCH_1}")
-    elseif(NOT _inc MATCHES "\\$<")
-        list(APPEND CMAKE_REQUIRED_INCLUDES "${_inc}")
-    endif()
-endforeach()
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/cmake/co2_capability.cpp" _uvco_probe)
-unset(UVCO_CO2_COMPATIBLE CACHE)
-check_cxx_source_compiles("${_uvco_probe}" UVCO_CO2_COMPATIBLE)
-cmake_pop_check_state()
-if(NOT UVCO_CO2_COMPATIBLE)
-    message(FATAL_ERROR "Incompatible co2 internal API. See cmake/co2_capability.cpp and CMakeConfigureLog.yaml")
+uvco_check_co2(_uvco_co2_ok "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/co2_capability.cpp")
+if(NOT _uvco_co2_ok)
+    message(FATAL_ERROR "Incompatible co2 internal API; see cmake/co2_capability.cpp")
 endif()
 
 # ---- libuv --------------------------------------------------------------------
 # 顺序：CMake config 包 → pkg-config → FetchContent。
-set(UVCO_LIBUV_TARGET "")
-if(TARGET libuv::uv)
-    set(UVCO_LIBUV_TARGET libuv::uv)
-else()
+set(UVCO_LIBUV_PROVIDER cmake)
+uvco_select_libuv(UVCO_LIBUV_TARGET)
+if(NOT UVCO_LIBUV_TARGET)
     find_package(libuv CONFIG QUIET)
-    if(TARGET libuv::uv)
-        set(UVCO_LIBUV_TARGET libuv::uv)
-    elseif(TARGET libuv::uv_a)
-        set(UVCO_LIBUV_TARGET libuv::uv_a)
-    endif()
+    uvco_select_libuv(UVCO_LIBUV_TARGET)
 endif()
 if(UVCO_LIBUV_TARGET)
     message(STATUS "uvco: using libuv from CMake package (${UVCO_LIBUV_TARGET})")
@@ -78,6 +64,7 @@ else()
         pkg_check_modules(UVCO_LIBUV QUIET IMPORTED_TARGET libuv>=1.40)
         if(UVCO_LIBUV_FOUND)
             set(UVCO_LIBUV_TARGET PkgConfig::UVCO_LIBUV)
+            set(UVCO_LIBUV_PROVIDER pkgconfig)
             message(STATUS "uvco: using libuv ${UVCO_LIBUV_VERSION} from pkg-config")
         endif()
     endif()
@@ -90,7 +77,13 @@ if(NOT UVCO_LIBUV_TARGET)
         GIT_REPOSITORY https://github.com/libuv/libuv.git
         GIT_TAG ${UVCO_LIBUV_GIT_TAG})
     FetchContent_MakeAvailable(libuv)
+    set_property(DIRECTORY "${libuv_SOURCE_DIR}" PROPERTY EXCLUDE_FROM_ALL TRUE)
     set(UVCO_LIBUV_TARGET uv_a)
+endif()
+
+uvco_check_libuv(_uvco_libuv_ok ${UVCO_LIBUV_TARGET})
+if(NOT _uvco_libuv_ok)
+    message(FATAL_ERROR "uvco requires libuv >= 1.40 (checked actual headers on every discovery path)")
 endif()
 
 # ---- uvco ---------------------------------------------------------------------
@@ -99,7 +92,31 @@ add_library(uvco::uvco ALIAS uvco)
 target_compile_features(uvco INTERFACE cxx_std_14)
 target_include_directories(uvco INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
-target_link_libraries(uvco INTERFACE co2::co2 ${UVCO_LIBUV_TARGET})
+target_link_libraries(uvco INTERFACE
+    $<BUILD_INTERFACE:co2::co2>
+    $<BUILD_INTERFACE:${UVCO_LIBUV_TARGET}>
+    $<INSTALL_INTERFACE:uvco::dependencies>)
+
+if(UVCO_ENABLE_INSTALL)
+    include(GNUInstallDirs)
+    include(CMakePackageConfigHelpers)
+    target_include_directories(uvco INTERFACE $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+    set(_uvco_package_dir "${CMAKE_INSTALL_LIBDIR}/cmake/uvco")
+    install(TARGETS uvco EXPORT uvcoTargets COMPONENT uvco)
+    install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} COMPONENT uvco)
+    install(EXPORT uvcoTargets FILE uvcoTargets.cmake NAMESPACE uvco::
+        DESTINATION ${_uvco_package_dir} COMPONENT uvco)
+    configure_package_config_file(cmake/uvcoConfig.cmake.in
+        ${CMAKE_CURRENT_BINARY_DIR}/uvcoConfig.cmake
+        INSTALL_DESTINATION ${_uvco_package_dir} PATH_VARS CMAKE_INSTALL_INCLUDEDIR)
+    # 0.x: patch compatible, not cross-minor compatible.
+    write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/uvcoConfigVersion.cmake
+        VERSION ${PROJECT_VERSION} COMPATIBILITY SameMinorVersion ARCH_INDEPENDENT)
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/uvcoConfig.cmake
+        ${CMAKE_CURRENT_BINARY_DIR}/uvcoConfigVersion.cmake
+        cmake/uvcoDependencies.cmake cmake/co2_capability.cpp
+        DESTINATION ${_uvco_package_dir} COMPONENT uvco)
+endif()
 
 if(UVCO_BUILD_TESTS)
     enable_testing()
