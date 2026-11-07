@@ -28,13 +28,13 @@
 
 namespace uvco {
 
-class Sleep : public detail::ReqAwaiter<Sleep, uv_timer_t, void> {
+class Sleep : public detail::ReqAwaiter<Sleep, uv_timer_t, void>, private detail::LoopResident {
     using Base = detail::ReqAwaiter<Sleep, uv_timer_t, void>;
 
   public:
     Sleep(Loop& loop, std::chrono::milliseconds const duration) noexcept
         : Base{loop}, duration_{detail::toMilliseconds(duration)} {}
-    Sleep(Sleep&&) = default;
+    Sleep(Sleep&& other) noexcept : Base{std::move(other)}, duration_{other.duration_} {}
 
     void setDuration(std::chrono::milliseconds const duration) noexcept {
         duration_ = detail::toMilliseconds(duration);
@@ -46,6 +46,7 @@ class Sleep : public detail::ReqAwaiter<Sleep, uv_timer_t, void> {
         int status = uv_timer_init(loop, &req_);
         UVCO_CONTRACT_CHECK(status == 0);
         req_.data = static_cast<Base*>(this);
+        linkTo(this->loop());
         closing_ = false;
         closeStatus_ = 0;
         uv_update_time(loop); // 从调用时刻起算，而不是从本次迭代开始时缓存的 uv_now 起算
@@ -59,6 +60,8 @@ class Sleep : public detail::ReqAwaiter<Sleep, uv_timer_t, void> {
     void cancel() noexcept { closeWith(UV_ECANCELED); }
 
   private:
+    void loopClosing() noexcept override { closeWith(UVCO_EABORTED); }
+    void loopGone() noexcept override { UVCO_CONTRACT_FAIL("pending Sleep survived Loop teardown"); }
     static Sleep& self(uv_timer_t* const timer) noexcept {
         return static_cast<Sleep&>(*static_cast<Base*>(timer->data));
     }
@@ -74,7 +77,10 @@ class Sleep : public detail::ReqAwaiter<Sleep, uv_timer_t, void> {
 
     static void onClosed(uv_handle_t* const handle) noexcept {
         auto* const timer = reinterpret_cast<uv_timer_t*>(handle);
-        complete(timer, self(timer).closeStatus_);
+        auto& op=self(timer);
+        int status=op.closeStatus_;
+        op.unlinkFrom(op.loop());
+        complete(timer, status);
     }
 
     std::uint64_t duration_;

@@ -255,4 +255,15 @@ TEST_CASE("regression: unstarted handle operations keep their blocks alive") {
   CHECK(uvco::run(loop,afterClose(std::move(op))));
  }
 }
+auto teardownNap(uvco::Loop& loop)
+ CO2_BEG(co2::Task<uvco::Result<void>>, (loop), uvco::Result<void> r;) {
+ CO2_AWAIT_SET(r,uvco::sleep(loop,30s));CO2_RETURN(r);
+} CO2_END
+TEST_CASE("regression: Loop destruction completes frame-local Sleep") {
+ auto loop=std::unique_ptr<uvco::Loop>{new uvco::Loop};
+ auto h=co2::spawn(*loop,teardownNap(*loop));uv_run(loop->raw(),UV_RUN_NOWAIT);
+ loop.reset();
+ if(not h.isReady()) std::_Exit(91); // old implementation never completes; avoid destructor contract abort
+ auto r=h.join();CHECK(not r && r.error()==Errc::aborted);
+}
 UVCO_TEST_MAIN
