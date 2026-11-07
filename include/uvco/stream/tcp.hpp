@@ -58,7 +58,7 @@ class TcpConnectAwaiter final : public ConnectAwaiterBase<TcpConnectAwaiter> {
         : ConnectAwaiterBase{block}, address_{address} {}
 
     int startOp(uv_connect_t* const req) noexcept {
-        return uv_tcp_connect(req, static_cast<TcpBlock*>(block_)->tcp(), address_.raw(),
+        return uv_tcp_connect(req, static_cast<TcpBlock*>(static_cast<StreamBlock*>(block_))->tcp(), address_.raw(),
                               &TcpConnectAwaiter::onDone);
     }
 

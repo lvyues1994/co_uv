@@ -164,7 +164,7 @@ class TickAwaiter {
     Result<std::uint64_t> await_resume() noexcept { return block_->resumeTick(); }
 
   private:
-    TimerBlock* block_;
+    HandleRef<TimerBlock> block_;
 };
 
 } // namespace detail

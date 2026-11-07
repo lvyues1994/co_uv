@@ -169,4 +169,14 @@ TEST_CASE("process inherit fd and detached option") {
  co2::stop_source stop; stop.request_stop();
  r=uvco::run(loop,waitFor(*p),stop.get_token()); CHECK(not r && r.error()==uvco::Errc::canceled);
 }
+auto delayedWait(uvco::detail::ProcessWaitAwaiter& op)
+ CO2_BEG(co2::Task<uvco::Result<uvco::ExitStatus>>, (op), uvco::Result<uvco::ExitStatus> r;) {
+ CO2_AWAIT_SET(r,std::move(op));CO2_RETURN(r);
+} CO2_END
+TEST_CASE("regression: unstarted wait survives close") {
+ uvco::Loop loop;uvco::ProcessOptions o;o.file="/bin/true";
+ auto p=uvco::spawn(loop,o);CHECK(p);auto op=p->wait();
+ {auto c=p->close();}uvco::drain(loop);
+ auto r=uvco::run(loop,delayedWait(op));CHECK(not r && r.error()==uvco::Errc::aborted);
+}
 UVCO_TEST_MAIN

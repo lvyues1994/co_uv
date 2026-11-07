@@ -130,7 +130,7 @@ class ProcessWaitAwaiter {
     }
   private:
     static void cancel(void* b) { static_cast<ProcessBlock*>(b)->cancel(); }
-    ProcessBlock* block_;
+    HandleRef<ProcessBlock> block_;
     bool started_ = false;
     co2::stop_token token_;
     CancelHook hook_;

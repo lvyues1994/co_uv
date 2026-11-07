@@ -227,4 +227,32 @@ TEST_CASE("constructing a Loop ignores SIGPIPE") {
 }
 #endif
 
+template<class A> using OpResult = decltype(std::declval<A>().await_resume());
+template<class A> auto afterClose(A op)
+ CO2_BEG(co2::Task<bool>, (op), OpResult<A> r;) {
+ CO2_AWAIT_SET(r,std::move(op));CO2_RETURN(not r);
+} CO2_END
+TEST_CASE("regression: unstarted handle operations keep their blocks alive") {
+ uvco::Loop loop;
+ {
+  uvco::Timer h{loop}; auto op=h.tick(); {auto c=h.close();}uvco::drain(loop);
+  CHECK(uvco::run(loop,afterClose(std::move(op))));
+ }
+ {
+  uvco::Pipe h{loop};char data[8];auto op=h.read(uvco::buffer(data));
+  {auto c=h.close();}uvco::drain(loop);CHECK(uvco::run(loop,afterClose(std::move(op))));
+ }
+ {
+  uvco::Tcp h{loop};auto op=h.accept();{auto c=h.close();}uvco::drain(loop);
+  CHECK(uvco::run(loop,afterClose(std::move(op))));
+ }
+ {
+  uvco::Udp h{loop};char data[8];auto op=h.recv(uvco::buffer(data));
+  {auto c=h.close();}uvco::drain(loop);CHECK(uvco::run(loop,afterClose(std::move(op))));
+ }
+ {
+  uvco::Pipe h{loop};auto op=h.connect("unused");{auto c=h.close();}uvco::drain(loop);
+  CHECK(uvco::run(loop,afterClose(std::move(op))));
+ }
+}
 UVCO_TEST_MAIN

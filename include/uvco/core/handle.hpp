@@ -41,7 +41,10 @@
 namespace uvco {
 namespace detail {
 
+template<class Block> class HandleRef;
+
 class HandleBlock : public LoopResident {
+    template<class> friend class HandleRef;
   public:
     Loop& loop() const noexcept {
         if (loop_ == nullptr) UVCO_CONTRACT_FAIL("uvco handle used after its Loop was destroyed");
@@ -148,6 +151,21 @@ class HandleBlock : public LoopResident {
     bool owned_ = true; // 用户句柄（Handle<Block>）仍持有控制块
     bool closing_ = false;
     bool closed_ = false;
+};
+
+// An unstarted awaiter owns a reference separately from the pending-op count.
+// Copies are intentional: co2 may copy a small lvalue awaiter into its slot.
+template<class Block> class HandleRef {
+  public:
+    explicit HandleRef(Block* block) noexcept : block_{block} { if(block_) block_->holdBegin(); }
+    HandleRef(HandleRef const& other) noexcept : HandleRef{other.block_} {}
+    HandleRef(HandleRef&& other) noexcept : block_{std::exchange(other.block_,nullptr)} {}
+    HandleRef& operator=(HandleRef const&) = delete;
+    ~HandleRef() { if(block_) block_->holdEnd(); }
+    Block* operator->() const noexcept { return block_; }
+    operator Block*() const noexcept { return block_; }
+  private:
+    Block* block_;
 };
 
 // close() 的 awaiter：持有控制块指针（指针大小，放进 co2 的内联槽）。

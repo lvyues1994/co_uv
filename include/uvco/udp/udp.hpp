@@ -256,7 +256,7 @@ class UdpRecvAwaiter {
     Result<Datagram> await_resume() noexcept { return block_->resumeRecv(); }
 
   private:
-    UdpBlock* block_;
+    HandleRef<UdpBlock> block_;
     MutableBuffer buf_;
 };
 
@@ -374,7 +374,7 @@ class UdpSendAwaiter {
         r->waiter.resume(); // libuv 回调里内联恢复（send 回调，不是 recv 回调）
     }
 
-    UdpBlock* block_;
+    HandleRef<UdpBlock> block_;
     char const* data_;
     Req* req_ = nullptr;
     sockaddr_in6 to_;

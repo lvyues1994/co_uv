@@ -55,7 +55,7 @@ class PipeConnectAwaiter final : public ConnectAwaiterBase<PipeConnectAwaiter> {
 
     int startOp(uv_connect_t* const req) noexcept {
         // uv_pipe_connect 的错误总是经回调（下一次迭代）报告。
-        uv_pipe_connect(req, static_cast<PipeBlock*>(block_)->pipe(), path_.c_str(),
+        uv_pipe_connect(req, static_cast<PipeBlock*>(static_cast<StreamBlock*>(block_))->pipe(), path_.c_str(),
                         &PipeConnectAwaiter::onDone);
         return 0;
     }

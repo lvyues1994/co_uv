@@ -317,7 +317,7 @@ class ReadAwaiter {
     Result<std::size_t> await_resume() noexcept { return block_->resumeRead(); }
 
   private:
-    StreamBlock* block_;
+    HandleRef<StreamBlock> block_;
     MutableBuffer buf_;
 };
 
@@ -338,7 +338,7 @@ template <class Self, class Block> class AcceptAwaiter {
     }
 
   private:
-    Block* block_;
+    HandleRef<Block> block_;
 };
 
 // write：快路径 uv_try_write 一次写完时不分配；否则按需分配 uv_write_t。
@@ -471,7 +471,7 @@ class WriteAwaiter {
         r->waiter.resume(); // libuv 回调里内联恢复
     }
 
-    StreamBlock* block_;
+    HandleRef<StreamBlock> block_;
     ConstBuffer one_;
     std::vector<ConstBuffer> many_;
     Req* req_ = nullptr;
@@ -512,7 +512,7 @@ template <class Derived, class Req> class StreamReqAwaiter : public ReqAwaiter<D
 
     static void onDone(Req* const req, int const status) noexcept { Base::complete(req, status); }
 
-    StreamBlock* block_;
+    HandleRef<StreamBlock> block_;
     bool started_ = false;
     bool cancelRequested_ = false;
 };
