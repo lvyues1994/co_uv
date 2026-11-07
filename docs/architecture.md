@@ -372,6 +372,45 @@ Process 只可移动，HandleBlock 控制块持有 uv_process_t。
 - 启动失败没有子进程，直接关闭已初始化的 handle，不等待不存在的 exit callback。
 - WaitAwaiter 带 CancelHook，超出 co2 槽；本模块不承诺 wait 零分配。
 
+### 4.10 DNS
+
+`dns.hpp` 提供 `getaddrinfo(loop, string host, string service={}, addrinfo hints={})`
+与 `getnameinfo(loop, SocketAddress, int flags=0)`。均基于 ReqAwaiter，支持帧局部左值等待。
+host/service 按值拥有；空字符串作为 nullptr，嵌入 NUL 返回 EINVAL；hints 只复制
+flags/family/socktype/protocol，不保存调用者的指针链。地址列表按 resolver 顺序复制到
+vector<SocketAddress>，不去重、不缓存、不自动连接，仅输出 IPv4/IPv6 地址。
+
+回调入口仅检查一次 stop_token，作为取消/完成线性化点：取消可见则返回 canceled 并丢弃输出，
+即使 uv_cancel 因请求已运行而失败；入口之后的取消不覆盖该次完成。addrinfo 由作用域 guard
+在 complete/resume 前 uv_freeaddrinfo，包括失败、取消、投影异常。bad_alloc 映射 ENOMEM，
+其他投影异常保存在 exception_ptr，await_resume 重抛，不越过 libuv C 回调。
+getnameinfo 同样拥有 address 并复制 host/service 输出。测试只使用 NUMERICHOST/NUMERICSERV，
+不依赖公网 DNS。系统解析策略、外部 resolver 时延仍由系统/libuv 决定。
+
+### 4.11 Work
+
+`queueWork(loop, fn)` 基于 `ReqAwaiter<..., uv_work_t, R>`。fn 按值持有，可移动不可复制；
+优先调用 fn(co2::stop_token)，不接受 token 时调用 fn()。值/void 均支持，返回 Result<R>。
+取消：queued 先 uv_cancel，成功则 callable 不运行；busy/已运行则 request_stop 到工作专用
+stop_source，worker 自行轮询退出。取消 hook noexcept，不调用额外用户 hook；用户注册在
+工作 token 上的 callback 同样必须 noexcept。不强杀线程，after-work 前绝不交付/销毁 request。
+
+worker 中 callable、结果就地构造异常均捕获为 exception_ptr；libuv after-work 发布 worker
+写入后回 loop 完成。after-work 入口检查父 token 是取消线性化点；异常优先于取消，之后在
+await_resume 重抛。取消成功不回滚已有副作用；忽略 token 的运行中 callable 可以无限阻塞
+结构化完成。与 fs、DNS 共用 libuv 全局池，不引入独立 ThreadPool/KeepAlive。
+
+### 4.12 Result-aware all
+
+`whenAllResults(a...)` 复用 whenAny 的归一化、结果收集和 child continuation；RaceState 通过
+不可变 stopOnSuccess 策略区分 any/all。all 的成功分支不取消兄弟；首个错误/取消/异常请求
+停止兄弟。左至右启动，失败后尚未启动的分支不再启动；全部已启动分支结束后才交付。
+异常（包括结果转移异常）> 首个非 canceled 业务错误 > 取消；父取消即使被分支忽略，也在
+drain 后报告 canceled。成功 tuple 省略 void，全部 void 得 tuple<>；vector 形式输出
+vector<成功值>，void 形式为 Result<void>，空 vector 成功。变参形式至少一个分支。
+错误的“首个”以完成状态的原子发布顺序为准；等待者在最后一个分支完成的线程恢复。
+co2::whenAll 的 API、Result 作为值的语义、依赖源码均不改变。
+
 ## 5. v0.1 范围（已定）
 
 | 模块 | 包含 |
@@ -382,8 +421,9 @@ Process 只可移动，HandleBlock 控制块持有 uv_process_t。
 | stream（Tcp/Pipe） | ✅ |
 | udp | ✅ |
 | fs | ✅ |
-| dns、work（`uv_queue_work`） | ❌ 后续 |
-| process、signal、tty、poll | ❌ 后续 |
+| dns、work（`uv_queue_work`） | ✅ v0.1 后扩展 |
+| process | ✅ v0.1 后扩展 |
+| signal、tty、poll | ❌ 后续 |
 
 ## 6. 实现顺序（已定）
 
@@ -397,7 +437,8 @@ Process 只可移动，HandleBlock 控制块持有 uv_process_t。
 ## 7. 已定的实现决策
 
 - **大请求存储**：`uv_fs_t` 等大请求放在 uvco 自己的 awaiter 中，由协程帧直接持有，
-  不经过 co2 的 8 指针内联槽；零堆分配，不修改 co2 全局配置 `CO2_AWAIT_STORAGE_SIZE`。
+  帧局部左值等待时不经过 co2 的 8 指针内联槽、没有额外 awaiter 堆分配；右值大请求仍可能
+  退化为堆存储。不修改 co2 全局配置 `CO2_AWAIT_STORAGE_SIZE`。
 - **awaiter 所有权**：HandleRef 从构造起持有控制块，与 opBegin/opEnd 分开；CloseOp 从构造起持有 fd，
   清理关闭不受取消影响。LoopResident 允许 process 延迟关闭至退出（外部 uv_walk 不覆盖其回调）。
 - **Loop 所有权**：用户持有 `Loop`；`run(loop, task)` 只负责驱动，同一 loop 可承载多个 Task。
@@ -407,6 +448,12 @@ Process 只可移动，HandleBlock 控制块持有 uv_process_t。
 - **契约而非异常**：`Result::value()` / `error()` 用错状态、在非 loop 线程调用 libuv 相关接口、
   带着挂起请求析构 awaiter、带着存活的 `KeepAlive` 析构 Loop、在 Loop 析构后使用孤儿句柄——
   都是契约违规（走 co2 的契约处理器），不抛异常。（带着打开的句柄析构 Loop 已不再违规，见 §4.1。）
+
+- **单等待者槽**：内部 WaitSlot<T> 统一 idle/pending/done、等待者与 Result 交付；预约从 begin
+  保留至 take，完成但尚未恢复也不可重新占用。payload 限 nothrow move；分配型投影不放入此槽。
+  HandleRef、CancelHook、opBegin/opEnd 和底层 stop 留在模块内；槽不决定恢复策略。
+- **请求异常边界**：DNS guard 在恢复前释放 addrinfo；Work worker 捕获 exception_ptr，
+  after-work 后重抛。二者都在完成回调入口线性化取消，未发起时仍遵循 ReqAwaiter 的先看取消。
 
 ## 8. 待定问题
 
@@ -425,7 +472,8 @@ Process 只可移动，HandleBlock 控制块持有 uv_process_t。
 - 已解决：whenAny 分支续体收集结果时的 throwing move/construct 不再 terminate。
   tuple/vector 每分支保存 exception_ptr，续体仍 noexcept；将异常按 BranchEnd::exception 记入比赛，
   取消落败者并等待全部已启动分支结束后，从 await_resume 重抛。
-- whenAny 与 `co2::whenAll` 各自实现；kotatsu 用一个 `when_op` 同时实现 all / any，可在 co2 侧统一。
+- 已提供 Result-aware whenAllResults，复用 whenAny 的 RaceState 策略、归一化/异常收集。
+  tuple/range 外壳仍各自维护；与 co2::whenAll 的更深层统一仍应在 co2 侧完成。
 - sync 原语不支持跨线程使用；跨线程通信目前只能经 `scheduleOn(loop)` 回到 loop 线程再操作。
 - timeout 功能测试已去掉毫秒级耗时断言；独立 timer 精度测试仍保留容差，不代表硬实时保证。
 - stream：无 `Tty`；Pipe 不支持 IPC（传递句柄）与 Linux 抽象套接字（`uv_pipe_bind2` 需 libuv ≥1.46，
@@ -438,6 +486,10 @@ Process 只可移动，HandleBlock 控制块持有 uv_process_t。
   `~Loop` 竞争（`~Loop` 发现未处理的远程工作即契约违规）。
 - 保活释放竞争测试依赖 GNU ld / lld 的 `--wrap`，只在 Linux 上构建。
 - 尚未提供 install / export 规则（目前只支持 `add_subdirectory` / FetchContent 方式使用）。
+
+- DNS 暂无缓存、Happy Eyeballs、resolver 注入；Work 不强制中断，取消不撤销副作用。
+- 待扩展：capture/BufferedReader、目录迭代、socket 选项、Signal/TTY/fs_event/fs_poll；
+  本轮未更改 Process reap-on-destruct 或可能阻塞 Loop 析构的策略。
 
 ## 9. 与原设计的偏差（实现 core 时记录）
 
@@ -603,3 +655,19 @@ TSan（halt_on_error=1）并行重复 20 遍，单项 timeout=120 秒。包括 i
   日志在 build/review/whenany-*-tests.log，红测日志 whenany-red-* / whenany-extra-red-*。
 - 限制：析构函数须不抛异常；任一已启动分支不响应取消且永不结束时，whenAny/timeout 仍等待它，
   这是结构化并发语义，不通过强行销毁协程解决。all/any 上游统一与跨平台实机验证仍待后续。
+
+### P1 比对建议落地（2026-11-07）
+
+- 按顺序新增 whenAllResults、DNS、Work，再逐一迁移 Timer/stream/UDP/Process 到 WaitSlot。
+- whenAllResults 不替换 co2::whenAll，也不引入 kotatsu 的泛型 error/cancel 通道；维持 Result/Errc。
+- DNS 从 ReqAwaiter 设计，kotatsu 当前 async 树没有 DNS 模块；getaddrinfo 的 hints 只复制输入标量。
+- Work 以传给 fn 的 stop_token 提供协作取消，不额外暴露可能抛异常的 on_cancel 用户 hook。
+  worker 异常与结果构造异常都延迟至 after-work 完成后再传播。
+- WaitSlot 为 detail，不引入 busy 错误或隐式 close；旧的并发等待/带 pending 析构契约、
+  Timer 累积次数、UDP 延后唤醒、Process 缓存退出状态/回收策略全部保留。
+
+验证记录：27 个 CTest 项；GCC/Clang 各 5 遍、ASan/UBSan（开启 leak detection）10 遍、
+TSan 20 遍，总计 1080 次 CTest 执行全部通过；所有公共头单独包含构建通过。
+DNS Linux fault fixture 使用 wrap new 调用而不是覆盖全局 new/delete，避免与 TSan 的
+强符号 allocator interceptor 冲突，不禁用 sanitizer。build-only mutation 检查分别移除
+addrinfo guard、破坏 all 的 stop-on-success 策略，两组回归均以断言失败拒绝错误实现。
