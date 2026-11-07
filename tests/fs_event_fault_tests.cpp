@@ -99,6 +99,18 @@ TEST_CASE("FsEvent pre-cancel preserves buffered data and first loop completion 
     CHECK(!r && r.error() == uvco::Errc::aborted);
 }
 
+TEST_CASE("FsEvent preserves a terminal backend status even if native handle was deactivated first") {
+    uvco::Loop loop;
+    Files files;
+    auto watcher = fs::FsEvent::watch(loop, files.path);
+    CHECK(watcher);
+    CHECK(uv_fs_event_stop(target) == 0); // emulate backend deactivation before last error callback
+    inject(nullptr, 0, UV_EIO);
+    auto r = uvco::run(loop, next(loop, *watcher));
+    CHECK(!r && r.error() == static_cast<uvco::Errc>(UV_EIO));
+    CHECK(!watcher->isActive());
+}
+
 TEST_CASE("FsEvent unsupported initialization and failed start never close an uninitialized handle") {
     uvco::Loop loop;
     Files files;

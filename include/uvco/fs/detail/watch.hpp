@@ -135,7 +135,9 @@ class WatchBlock : public ::uvco::detail::HandleBlock {
     // Call only from the loop/native callback. Never access this after publish:
     // completion resumes inline and may close/restart/destroy the public owner.
     void publish(Result<T> result, std::exception_ptr exception = {}) noexcept {
-        if (!isActive()) return;
+        // A backend may deactivate before delivering its final error. Only
+        // closing invalidates delivery; next() drains buffered final statuses.
+        if (closing()) return;
         if (slot_.pending()) {
             exception_ = std::move(exception);
             auto waiter = slot_.complete(std::move(result));
