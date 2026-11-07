@@ -46,5 +46,6 @@ pipe_connect_to_file 两项已知失败。该记录是特定 port/测试环境�
    detach/killGroup/uid/gid 与目标路径。默认 reap-on-destruct / Loop 可能等待子进程的语义不变。
 4. `core/loop.hpp` 的 SIGPIPE 策略适用于所有非 Windows 平台：默认动作才改为忽略，已有用户 handler 保留。
    QNX 上同样可能生效，是进程级副作用；必须验证 EPIPE 与子进程信号行为，而非假定是 Linux-only。
-5. 当前没有 QNX CI/SDK/设备，也没有 uvco fs_event 模块；后续增加 fs_event 时必须正确交付 ENOSYS，
-   不能无说明地替换为轮询。新加的 macOS/Windows CI 也只是非阻塞探路，不改变支持承诺。
+5. 当前没有 QNX CI/SDK/设备。uvco 已增加 FsEvent：fallible `FsEvent::watch(loop,path)` 工厂
+   将 init 的 ENOSYS 作为 Result 错误返回，不关闭未初始化 handle，不隐式替换为轮询；Linux 包装 init 的
+   故障回归验证了清理路径，但不是 QNX 目标机测试。新加的 macOS/Windows CI 也只是非阻塞探路，不改变支持承诺。

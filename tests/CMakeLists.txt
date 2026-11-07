@@ -14,7 +14,7 @@ function(uvco_configure_test target)
     endif()
 endfunction()
 
-set(uvco_test_names libuv_header_tests listener_tests udp_options_tests yield_turn_tests dir_tests buffered_reader_tests capture_tests wait_slot_tests work_tests dns_tests when_all_results_tests when_any_exception_tests process_portable_tests result_tests loop_tests thread_tests timer_tests sync_tests udp_tests lifecycle_tests
+set(uvco_test_names fs_event_tests libuv_header_tests listener_tests udp_options_tests yield_turn_tests dir_tests buffered_reader_tests capture_tests wait_slot_tests work_tests dns_tests when_all_results_tests when_any_exception_tests process_portable_tests result_tests loop_tests thread_tests timer_tests sync_tests udp_tests lifecycle_tests
     run_wrong_thread_contract_test orphan_handle_use_contract_test timer_pending_destroy_contract_test
     sync_event_destroy_contract_test sync_when_any_empty_contract_test
     stream_concurrent_read_contract_test udp_concurrent_recv_contract_test)
@@ -194,4 +194,27 @@ if(UVCO_ENABLE_INSTALL AND UVCO_LIBUV_PROVIDER STREQUAL "pkgconfig")
     add_test(NAME uvco-dependency-tests COMMAND ${CMAKE_COMMAND} -DCONFIG=$<CONFIG>
         -P ${CMAKE_CURRENT_BINARY_DIR}/dependency_tests.cmake)
     set_tests_properties(uvco-dependency-tests PROPERTIES TIMEOUT 180)
+endif()
+
+target_compile_definitions(uvco-fs-event-tests PRIVATE UVCO_TEST_WATCH_DIR="${CMAKE_CURRENT_BINARY_DIR}")
+set_tests_properties(uvco-fs-event-tests PROPERTIES TIMEOUT 45)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(uvco-fs-event-fault-tests fs_event_fault_tests.cpp)
+    uvco_configure_test(uvco-fs-event-fault-tests)
+    target_compile_definitions(uvco-fs-event-fault-tests PRIVATE UVCO_TEST_WATCH_DIR="${CMAKE_CURRENT_BINARY_DIR}")
+    target_link_options(uvco-fs-event-fault-tests PRIVATE "-Wl,--wrap=uv_fs_event_init" "-Wl,--wrap=uv_fs_event_start")
+    if(UVCO_TEST_GLIBCXX_ABI)
+        target_compile_options(uvco-fs-event-fault-tests PRIVATE -fno-inline)
+        if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+            set(_uvco_append_symbol _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE6appendEPKcm)
+        else()
+            set(_uvco_append_symbol _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE6appendEPKcj)
+        endif()
+        target_compile_definitions(uvco-fs-event-fault-tests PRIVATE UVCO_TEST_APPEND_SYMBOL="${_uvco_append_symbol}")
+        target_link_options(uvco-fs-event-fault-tests PRIVATE "-Wl,--wrap=${_uvco_append_symbol}")
+        unset(_uvco_append_symbol)
+    endif()
+    add_test(NAME uvco-fs-event-fault-tests COMMAND uvco-fs-event-fault-tests)
+    set_tests_properties(uvco-fs-event-fault-tests PROPERTIES TIMEOUT 45)
 endif()

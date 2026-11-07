@@ -202,6 +202,35 @@ TSan 四构建各重复 2 遍，共 320 次全部通过；安装/源码消费者
 额外通过 CMake 3.28 的安装与两 TU 消费者测试；主验证使用 CMake 4.4。
 日志见 `build/install-{gcc,clang,asan,tsan}-*.log`；CMake 3.14、Windows/macOS 和多配置生成器未实机验证。
 
+## 文件变更监控
+
+```cpp
+// fallible factory：含 init/start 的错误，不会关闭未初始化的 native handle。
+auto watched = uvco::fs::FsEvent::watch(loop, directory); // Result<FsEvent>
+// 检查 watched 后，在协程中：
+CO2_AWAIT_SET(event, watched->next()); // Result<FsEventInfo>{owned filename, events}
+// events 是 UV_RENAME / UV_CHANGE 位掩码；filename 不可确定时为空。
+// watched->watch(newPath, flags) 事务式重启；失败保留旧监控。
+// watched->stop() 中止等待，CO2_AWAIT(watched->close()) 等待安全关闭。
+```
+
+`next()` 单等待者；从 awaiter 构造起保活控制块。stop_token 只取消本次等待（canceled），
+不停止监控、不消耗缓存；stop/close/成功重启/~Loop 中止挂起等待（aborted，经 loop 延后恢复）。
+原生回调内联恢复；先在 loop 上完成者胜出，迟到的取消不覆盖已交付结果。
+空/移走/已 close 对象只能析构或 close；Loop 先析构后同样只允许 close/析构。
+有挂起 next 时直接析构所有者仍是契约违规，请先 stop/close 并等待读者结束。
+
+默认固定 **32 条** FIFO；相邻同名 FsEvent 合并 rename/change 位，相邻相同错误合并；
+满时丢最旧条目。`queued()` / `overflowCount()` / `coalescedCount()` 可观测（计数饱和不回绕）。
+stop 清空缓存但保留计数；成功重启清空缓存并归零计数。它不是可靠文件系统日志，
+内核也可能合并/丢通知；容量限制条目数，不是 allocator 字节上限。
+文件名复制 bad_alloc → ENOMEM，其他投影异常缓存并从 next 的 await_resume 重抛，绝不跨 C 回调抛出。
+
+flags 使用 libuv 常量：默认 0；`UV_FS_EVENT_RECURSIVE` 仅 Windows/macOS 接受，Linux 等返回 ENOTSUP。
+`UV_FS_EVENT_STAT` / WATCH_ENTRY 上游没有实现，本封装明确返回 ENOTSUP，**不隐式降级为轮询**。
+不支持的后端（例如 QNX 的 no-fsevents）由 watch 工厂返回 ENOSYS，见 [QNX 说明](docs/qnx.md)。
+宏观语义由 Linux 实测，macOS/Windows CI 仍为非阻塞，QNX 尚无目标机验证。
+
 ## GitHub CI
 
 `.github/workflows/ci.yml` 在 push / pull_request / 手动触发时运行，不自动发布或推送。

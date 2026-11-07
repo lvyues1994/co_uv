@@ -507,6 +507,12 @@ openDir 的投影异常/迟到取消同步 closedir；readDir 只消耗游标，
   source 与 installed config 复用 co2 能力/真实 libuv >=1.40 头文件编译探测；不运行探测程序。
   parent 源 target 传递 usage 显式收集；不能求值的复杂 source generator expression 拒绝而不是误验系统头。
 
+- **FS 通知通道**：FsEvent 为 fallible watch 工厂 + HandleBlock/HandleRef/WaitSlot；固定 32 条 FIFO，
+  相邻同名事件合并位，相邻同错误合并，满时丢最旧并累计 overflow。计数饱和；stop 清缓存保留计数，
+  成功事务式 restart 新控制块并归零。取消只针对 next，完成先于迟到取消；stop/close/restart 延后恢复。
+  init 失败直接释放未初始化控制块，绝不调用 uv_close；回调投影的 bad_alloc→ENOMEM，其他异常按条目保存，
+  take 完成清理后重抛。原生回调内联恢复后不再访问控制块。
+
 ## 8. 待定问题
 
 - uvco core 依赖 co2 的若干 `detail` 接口：`TaskAccess`（启动 Task / 取结果）、`stopTokenOf`
@@ -543,7 +549,7 @@ openDir 的投影异常/迟到取消同步 closedir；readDir 只消耗游标，
 
 - DNS 暂无缓存、Happy Eyeballs、resolver 注入；Work 不强制中断，取消不撤销副作用。
 - P2 已增加 capture/BufferedReader、目录迭代、UDP multicast 选项、listener 门面与 yieldNextTurn；
-  待扩展 Signal/TTY/fs_event/fs_poll。未更改 Process reap-on-destruct 或可能阻塞 Loop 析构的策略。
+  FsEvent 已实现；待扩展 Signal/TTY/fs_poll。未更改 Process reap-on-destruct 或可能阻塞 Loop 析构的策略。
 - capture 不保留错误时部分输出，无信号升级/跨平台 process-tree 后端；POSIX leader 已回收后
   不再寻址旧 PGID。BufferedReader cap 不是硬 allocator 限额；Dir close 是同步清理。
 
@@ -776,3 +782,15 @@ provider、co2 不兼容、旧实际头文件（含 metadata 虚报高版本）�
 CMake 3.14 的命令兼容性保留但未实机运行；Windows/macOS、多配置生成器同样尚待验证。
 红/绿证据：build/install-red.log 为原版无安装产物失败；build/install-transitive-red.log 为
 原先 parent wrapper 传递旧头文件被误接受的回归，修复后通过。最终日志 build/install-*-{config,build,test}.log。
+
+### 实现 fs watcher：FsEvent
+
+- 新增 fs/fs_event.hpp、fs/detail/watch.hpp；不使用 FsOp/ReqAwaiter（原生是重复回调 handle，不是单次请求）。
+- 构造采用 `FsEvent::watch(loop,path,flags)->Result<FsEvent>`，同名成员 watch(path,flags) 可重启；
+  避免 Timer 风格 init 成功契约错误地在 QNX ENOSYS 时 abort。空默认对象仍遵循既有 Handle 契约。
+- 原生 init 错误原样返回；STAT/WATCH_ENTRY 明确 ENOTSUP；recursive 只在 Windows/macOS 放行。
+- 缓存是有损、有界通知而非日志。32 条、合并和 overflow counter 属于 API 契约；无自动扫描/补偿。
+- 公共 restart 事务式替换控制块，失败保留旧 watch；成功中止旧 next 的结果为 aborted。
+- 实测：Linux create/modify/rename/delete、跨线程取消、close 未启动 lease、Loop 析构和 fd 稳定性；
+  --wrap 覆盖 ENOSYS init / EACCES start 清理、固定容量/顺序/合并、预取消保留缓存、迟取消、投影异常。
+  不把 Linux 测试结果解释为 macOS/Windows/QNX 认证。
