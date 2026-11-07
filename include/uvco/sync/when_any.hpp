@@ -261,18 +261,31 @@ template <class V> BranchEnd classify(::uvco::detail::co2compat::ResultStorage<V
     return r.error() == Errc::canceled ? BranchEnd::cancelled : BranchEnd::error;
 }
 
-// 已结束的分支：取走结果（异常留在 Task 里，稍后重抛）并分类。
+// Result transfer may throw even after the branch Task has completed. Never
+// let that exception escape a child continuation: it must still publish its
+// completion and release the structured-concurrency remaining count.
 template <class V>
-BranchEnd collect(co2::Task<V>& task, ::uvco::detail::co2compat::ResultStorage<V>& slot) {
-    if (::uvco::detail::co2compat::TaskAccess::hasError(task)) return BranchEnd::exception;
+BranchEnd collectValue(co2::Task<V>& task, ::uvco::detail::co2compat::ResultStorage<V>& slot) {
     slot = ::uvco::detail::co2compat::TaskAccess::takeResult(task);
     return classify(slot, IsResult<V>{});
 }
-inline BranchEnd collect(co2::Task<void>& task, ::uvco::detail::co2compat::ResultStorage<void>& slot) {
-    if (::uvco::detail::co2compat::TaskAccess::hasError(task)) return BranchEnd::exception;
+inline BranchEnd collectValue(co2::Task<void>& task,
+                             ::uvco::detail::co2compat::ResultStorage<void>& slot) {
     ::uvco::detail::co2compat::TaskAccess::takeResult(task);
     slot.emplace();
     return BranchEnd::success;
+}
+template <class V>
+BranchEnd collect(co2::Task<V>& task, ::uvco::detail::co2compat::ResultStorage<V>& slot,
+                  std::exception_ptr& exception) noexcept {
+    try {
+        if (::uvco::detail::co2compat::TaskAccess::hasError(task))
+            ::uvco::detail::co2compat::TaskAccess::rethrowError(task);
+        return collectValue(task, slot);
+    } catch (...) {
+        exception = std::current_exception();
+        return BranchEnd::exception;
+    }
 }
 
 template <class V> Errc errorOf(::uvco::detail::co2compat::ResultStorage<V>& slot, std::true_type) noexcept {
@@ -448,9 +461,10 @@ template <class... V> class WhenAnyTuple {
             .resume();
     }
 
-    // collect 可能抛出（结果的移动构造）；在续体里无处可报，按契约处理。
+    // Each child owns its exception slot. collect catches transfer/body errors;
+    // RaceState records priority and drains all started children before rethrow.
     template <std::size_t I> BranchEnd collectOne() noexcept {
-        return collect(std::get<I>(tasks_), std::get<I>(slots_));
+        return collect(std::get<I>(tasks_), std::get<I>(slots_), exceptions_[I]);
     }
     template <std::size_t... I>
     BranchEnd collectAt(std::size_t const index, std::index_sequence<I...>) noexcept {
@@ -460,7 +474,8 @@ template <class... V> class WhenAnyTuple {
     }
 
     template <std::size_t I> void rethrowOne() {
-        ::uvco::detail::co2compat::TaskAccess::rethrowError(std::get<I>(tasks_));
+        UVCO_CONTRACT_CHECK(exceptions_[I] != nullptr);
+        std::rethrow_exception(exceptions_[I]);
     }
     template <std::size_t... I> void rethrow(std::size_t const index, std::index_sequence<I...>) {
         using Fn = void (WhenAnyTuple::*)();
@@ -497,6 +512,7 @@ template <class... V> class WhenAnyTuple {
     std::tuple<co2::Task<V>...> tasks_;
     std::tuple<::uvco::detail::co2compat::ResultStorage<V>...> slots_;
     std::array<BranchEnd, count> ends_{};
+    std::array<std::exception_ptr, count> exceptions_{};
     RaceState state_;
     std::array<RaceChild<WhenAnyTuple>, count> children_{};
 };
@@ -510,7 +526,7 @@ template <class V> class WhenAnyRange {
 
     explicit WhenAnyRange(std::vector<co2::Task<V>> tasks)
         : tasks_(std::move(tasks)), slots_(tasks_.size()), ends_(tasks_.size()),
-          children_(tasks_.size()) {
+          exceptions_(tasks_.size()), children_(tasks_.size()) {
         UVCO_CONTRACT_CHECK(not tasks_.empty()); // 没有分支就没有胜者
     }
 
@@ -542,8 +558,10 @@ template <class V> class WhenAnyRange {
     Result<Value> await_resume() {
         if (state_.stoppedEarly) return Result<Value>{Errc::canceled};
         std::size_t const exception = state_.firstException.load(std::memory_order_acquire);
-        if (exception != RaceState::none)
-            ::uvco::detail::co2compat::TaskAccess::rethrowError(tasks_[exception]);
+        if (exception != RaceState::none) {
+            UVCO_CONTRACT_CHECK(exceptions_[exception] != nullptr);
+            std::rethrow_exception(exceptions_[exception]);
+        }
         std::size_t const error = state_.firstError.load(std::memory_order_acquire);
         if (error != RaceState::none) return Result<Value>{errorOf(slots_[error], IsResult<V>{})};
         std::size_t const decider = state_.decider.load(std::memory_order_acquire);
@@ -555,7 +573,7 @@ template <class V> class WhenAnyRange {
     }
 
     co2::coroutine_handle<> branchDone(std::size_t const index) noexcept {
-        ends_[index] = collect(tasks_[index], slots_[index]);
+        ends_[index] = collect(tasks_[index], slots_[index], exceptions_[index]);
         return state_.branchDone(index, ends_[index]);
     }
 
@@ -571,6 +589,7 @@ template <class V> class WhenAnyRange {
     std::vector<co2::Task<V>> tasks_;
     std::vector<::uvco::detail::co2compat::ResultStorage<V>> slots_;
     std::vector<BranchEnd> ends_;
+    std::vector<std::exception_ptr> exceptions_;
     RaceState state_;
     std::vector<RaceChild<WhenAnyRange>> children_;
 };
