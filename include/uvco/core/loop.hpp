@@ -102,11 +102,17 @@ inline Loop*& currentLoopSlot() noexcept {
 
 class Loop final : public co2::Scheduler {
   public:
-    Loop() : owner_{std::this_thread::get_id()} {
+    // Fixed per-queue capacity: allocation belongs to construction, never to a
+    // noexcept schedule/drain callback. Exceeding this configured bound is a
+    // contract violation, not an implicit allocation or dropped continuation.
+    explicit Loop(std::size_t scheduleCapacity = 65536) : owner_{std::this_thread::get_id()}, scheduleCapacity_{scheduleCapacity} {
         UVCO_CONTRACT_CHECK(detail::currentLoopSlot() == nullptr); // 每线程至多一个 Loop
 #ifndef _WIN32
         detail::ignoreSigpipeOnce();
 #endif
+        UVCO_CONTRACT_CHECK(scheduleCapacity_ != 0);
+        local_.reserve(scheduleCapacity_);batch_.reserve(scheduleCapacity_);
+        remote_.reserve(scheduleCapacity_);remoteBatch_.reserve(scheduleCapacity_);
         int status = uv_loop_init(&loop_);
         UVCO_CONTRACT_CHECK(status == 0);
         loop_.data = this;
@@ -229,10 +235,12 @@ class Loop final : public co2::Scheduler {
         UVCO_CONTRACT_CHECK(static_cast<bool>(coroutine));
         if (isLoopThread()) {
             if (local_.empty()) uv_idle_start(&idle_, &Loop::onIdle);
+            UVCO_CONTRACT_CHECK(local_.size() < scheduleCapacity_);
             local_.push_back(coroutine);
             return;
         }
         std::lock_guard<std::mutex> lock{mutex_};
+        UVCO_CONTRACT_CHECK(remote_.size() < scheduleCapacity_);
         remote_.push_back(coroutine);
         // 在锁内发送：一旦解锁，loop 线程就可能排空队列、完成 run() 并销毁 Loop。
         uv_async_send(&async_);
@@ -416,6 +424,7 @@ class Loop final : public co2::Scheduler {
     std::vector<co2::coroutine_handle<>> remote_;
     detail::LoopCallback* callbacks_ = nullptr;
     unsigned long keepAlive_ = 0;
+    std::size_t const scheduleCapacity_;
 };
 
 namespace detail {
