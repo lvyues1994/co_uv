@@ -29,7 +29,7 @@ template<class F> class Work final : public ReqAwaiter<Work<F>,uv_work_t,WorkVal
     Work(Loop& loop,F fn):Base{loop},fn_{std::move(fn)}{}
     Work(Work&&)=default;
     int start(uv_loop_t* loop) {
-        exception_=nullptr;out_.reset();stopped_=false;source_=co2::stop_source{};
+        exception_=nullptr;out_.reset();source_=co2::stop_source{};
         return uv_queue_work(loop,&this->req_,&onWork,&onDone);
     }
     // Always try dequeue first. Only a running/finished worker needs the
@@ -40,7 +40,6 @@ template<class F> class Work final : public ReqAwaiter<Work<F>,uv_work_t,WorkVal
     Result<R> finish(int status) {
         if(exception_)std::rethrow_exception(exception_);
         if(status<0)return static_cast<Errc>(status);
-        if(stopped_)return Errc::canceled;
         return WorkResult<R>::take(out_);
     }
   private:
@@ -50,17 +49,14 @@ template<class F> class Work final : public ReqAwaiter<Work<F>,uv_work_t,WorkVal
         catch(...){self.exception_=std::current_exception();}
     }
     static void onDone(uv_work_t* req,int status) noexcept {
-        auto& self=*static_cast<Work*>(req->data);
         // libuv publishes all worker writes before after-work. This callback
-        // entry is the cancellation/completion linearization point.
-        self.stopped_=self.stopRequested();
+        // entry publishes a completed result, even after a late stop request.
         Base::complete(req,status); // may destroy self; no access afterwards
     }
     F fn_;
     co2::stop_source source_;
     co2compat::ResultStorage<R> out_;
     std::exception_ptr exception_;
-    bool stopped_=false;
 };
 } // namespace detail
 // Callable may accept a cooperative stop_token, or take no argument. The token
