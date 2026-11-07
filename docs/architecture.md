@@ -313,8 +313,9 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
   （路径为 `std::string`，因为 Task 是惰性的、`CO2_AWAIT` 语句里的临时对象在挂起前就已销毁），
   提供 `submit()`（发起 `uv_fs_xxx`）、`project()`（把成功的请求转换为值）与可选的 `release()`。
   新增一个操作只需要一个十来行的 Spec 加一行别名 / 便捷函数（借鉴 kotatsu 的 `fs_call`）。
-- **uv_fs_req_cleanup 总会执行**：libuv 回调里先 `project()`，再 `uv_fs_req_cleanup`，最后恢复等待者；
-  发起失败时也立即清理。
+- **uv_fs_req_cleanup 总会执行**：投影成功/抛异常后都 cleanup，最后恢复等待者；发起失败时也立即清理。
+  投影 bad_alloc 返回 no_memory，其余异常缓存后在 await_resume 重抛，不穿越 libuv 回调边界。
+  资源型 Spec 必须在所有可抛步骤完成后才转移所有权（mkstemp 先分配路径，再接管 fd）。
 - **两种等待方式**（§7）：
   - 帧局部：`fs::StatOp op{loop, path};` 写在 `CO2_BEG` 局部列表里，`CO2_AWAIT_SET(r, op);`——
     零分配，可重复等待，两次等待之间经 `op.args()` 修改参数（在途时调用是契约违规）；
@@ -322,7 +323,8 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
 - **File**：只可移动的 fd 所有者。`fs::open(loop, path, flags, mode = 0644)` 返回 `Result<File>`；
   `read(buf, offset = -1)` / `write(buf, offset = -1)`（-1 为当前位置）返回字节数，
   `sync()`、`truncate(size)`、`stat()`、`close()`（File 立即变空，awaiter 持有 fd），
-  `release()` 交出 fd，`reset()` 同步关闭。**析构时若仍打开则同步关闭**（`uv_fs_close` 无回调，
+  `release()` 交出 fd，`reset()` 同步关闭。close awaiter 自构造起拥有 fd，不可取消，
+  未等待时其析构同步关闭（readFile/writeFile 也使用此协议）。**File 析构时若仍打开则同步关闭**（`uv_fs_close` 无回调，
   阻塞调用线程一次 `close(2)`；不依赖 Loop 仍然存活）。File 的操作按值捕获 fd：在操作在途时
   关闭 / 析构 / 移走 File 是调用者的错误（与对同一 fd 调用 `close(2)` 一样，fd 可能被重用）。
 - **自由函数**：`stat`、`lstat`、`unlink`、`mkdir(mode = 0777)`、`rmdir`、`rename`、
@@ -334,7 +336,8 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
 - **取消**：通过 `uv_cancel`，尽力而为——只能撤下还没被线程池取走的请求。Linux 上 libuv（≥1.45）
   可能把部分 fs 请求（open、close、read、write、fsync、stat……）交给 io_uring，此时 `uv_cancel` 返回
   `EBUSY`，请求自然完成。
-- **迟到的取消**（借鉴 kotatsu 的 Release 钩子）：取消已请求、但请求仍然成功完成时，
+- **迟到的取消**（借鉴 kotatsu 的 Release 钩子）：以完成回调读取 stop_token 为线性化点，
+  即使取消投递尚未执行，已请求的停止仍生效；请求成功完成时，
   产生资源的操作在回调里同步释放资源并报告 `Errc::canceled`——`open` 关闭 fd，`mkstemp` 关闭 fd
   并删除文件，`mkdtemp` 删除目录。不产生资源的操作照常报告真实结果（副作用已经发生，例如
   unlink；read 读到的数据也照常返回）。
@@ -345,30 +348,29 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
 
 ### 4.9 process（v0.1 之后的扩展）
 
-`uvco/process.hpp` 提供 `uv_spawn` 包装，不使用 shell 隐式解释参数。
+`uvco/process.hpp` 提供 `spawn(loop, ProcessOptions)` → `Result<Process>`。
+Process 只可移动，HandleBlock 控制块持有 uv_process_t。
 
-- `spawn(loop, ProcessOptions)` 同步返回 `Result<Process>`；`Process` 只可移动，控制块继承
-  `HandleBlock` 并持有 `uv_process_t`。启动失败也异步关闭 libuv 已初始化的 handle。
-- `ProcessOptions`：`file`、`args`（不包含 argv[0]，库自动用 file 补齐）、`env`、`inheritEnv`、
-  `cwd`、`stdio`、`detached`、`setUid/uid`、`setGid/gid`。空 env 默认继承父环境；
-  `inheritEnv=false` 且空 env 表示空环境；非空 env 为完整替换而非增量覆盖。
-- stdio 默认忽略三个标准描述符；`ProcessStdio::ignore()`、`inherit(fd)`、`inherit(Pipe&)`、
-  `createPipe(Pipe&, childReads, childWrites)`。方向按子进程视角：stdin 是 childReads，stdout
-  是 childWrites。调用者先创建同一 Loop 上尚未打开的 Pipe，再把它传给 createPipe；spawn 后它就是
-  父端 stream，继续使用现有 read/write/shutdown/close。指针仅在 spawn 调用期间使用。
-- `pid()` 返回 pid；`kill(signum)` 返回 Result<void>，仅显式调用才发送信号。
-- `wait()` → `Result<ExitStatus{exit_status, term_signal}>`。退出回调缓存结果，退出后再等立即完成，
-  可以重复等待；同一时刻只能有一个 wait（含完成但尚未恢复的阶段，违反则契约失败）。
-  libuv 退出回调内联恢复；取消和 close 经 Loop 调度恢复。
-- stop_token 只取消等待（canceled），不杀进程；预先停止优先于已缓存的退出结果。
-  取消后可再次 wait。close/Loop 析构中止等待为 aborted。
-- 析构/close 不杀子进程。正常路径应先 wait 再 close；运行中关闭 handle 会停止 libuv 的退出监视，
-  POSIX 调用者需自行处理之后的 waitpid/reaping，可能留下僵尸，库不提供后台 reaper。
-  析构时有挂起 wait 仍沿用通用 Handle 契约：先取消并恢复，或显式 close 中止；不能直接析构。
-- detached 只设置 UV_PROCESS_DETACHED，不自动 unref：持有的运行中 Process 仍保活 Loop。
-  Loop 析构关闭 handle 而不等待子进程退出；控制块成为孤儿，之后只可 close/析构。
-- 线程约束、关闭 awaiter 和控制块保活协议均复用 §4.2。WaitAwaiter 自带 CancelHook，体积超出
-  co2 内联槽，直接 await 的时候有一次 awaiter 堆分配（本模块不承诺零分配）。
+- 参数：file、args（不含 argv[0]）、env（完整替换）、inheritEnv、cwd、stdio、detached、setUid/uid、setGid/gid。
+  空 env 默认继承；inheritEnv=false 且空 env 表示空环境。
+- stdio：ProcessStdio::ignore、inherit(fd/Pipe)、createPipe(Pipe&, childReads, childWrites)。
+  调用者拥有父端 Pipe；方向按子进程视角。Pipe 必须来自同一 Loop，createPipe 要求尚未打开。
+- pid()、kill(signum)、wait() → Result<ExitStatus>。退出回调缓存结果；可重复等待，但同一时间只允许一个
+  活跃 wait（包含完成但未恢复的阶段）。回调内联恢复，取消/close 经 Loop 调度恢复。
+- wait 取消返回 canceled，不杀子进程；预停止优先于缓存退出结果。取消后可再次等待。
+  awaiter 从构造起保活控制块，可以跨 close；开始等待已关闭控制块返回 aborted。
+- **析构：后台 reap-only**。不杀子进程，放弃所有者后控制块继续登记在 Loop 上，保持 ref；
+  退出后由 libuv 回收，自动关闭 handle。drain 会等到此类子进程退出。
+  带 pending wait 析构仍为契约违规，应先取消并恢复或显式 close。
+- **close：保留回收责任**。中止 pending wait 为 aborted，close awaiter 等待子进程退出/回收/handle 关闭。
+  不想等待可显式 kill 后 close；关闭本身不发送信号。
+- **detach()：显式移交回收责任**。返回 pid，立即停止 libuv 监视并关闭 handle；POSIX 调用者需自行 waitpid。
+  ProcessOptions.detached 只设置 UV_PROCESS_DETACHED，与这里的所有权移交 API 不同，不自动 unref。
+- **Loop 先析构策略**：中止等待为 aborted，但保留 process 监视直到退出并回收，再关闭 handle；
+  没有隐式 kill，所以 Loop 析构可能无限等待未退出的非 detach 子进程。这是选择保留回收责任的明确代价。
+  之后仍存活的 Process/awaiter 持有孤儿控制块，只允许释放/析构。
+- 启动失败没有子进程，直接关闭已初始化的 handle，不等待不存在的 exit callback。
+- WaitAwaiter 带 CancelHook，超出 co2 槽；本模块不承诺 wait 零分配。
 
 ## 5. v0.1 范围（已定）
 
@@ -396,6 +398,8 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
 
 - **大请求存储**：`uv_fs_t` 等大请求放在 uvco 自己的 awaiter 中，由协程帧直接持有，
   不经过 co2 的 8 指针内联槽；零堆分配，不修改 co2 全局配置 `CO2_AWAIT_STORAGE_SIZE`。
+- **awaiter 所有权**：HandleRef 从构造起持有控制块，与 opBegin/opEnd 分开；CloseOp 从构造起持有 fd，
+  清理关闭不受取消影响。LoopResident 允许 process 延迟关闭至退出（外部 uv_walk 不覆盖其回调）。
 - **Loop 所有权**：用户持有 `Loop`；`run(loop, task)` 只负责驱动，同一 loop 可承载多个 Task。
 - **依赖引入**：libuv 与 co2 均优先 `find_package`（libuv 还会尝试 pkg-config），找不到时回退到
   FetchContent。co2 的预览版包不接受数值版本号，因此 `find_package(co2 CONFIG)` 不带版本；
@@ -408,9 +412,10 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
 
 - uvco core 依赖 co2 的若干 `detail` 接口：`TaskAccess`（启动 Task / 取结果）、`stopTokenOf`
   （从 promise 取 stop_token）、`FrameHeader` / `noopDestroy`（run() 的手写完成帧）。
-  co2 稳定前需要跟进其变化，或请 co2 提供公开的“启动 Task”扩展点。
-- `TickAwaiter` 只持有控制块指针，应立即 `CO2_AWAIT(t.tick())`；若先取出 awaiter、跨过 `close()`
-  再等待则悬垂（目前无检查）。
+  已集中在 core/co2_compat.hpp，CMake 对已安装/FetchContent co2 都做能力编译探测；
+  仍需跟进其语义变化，未来推动公开“启动 Task”扩展点。
+- 已解决：timer/stream/udp/process 的未启动 awaiter 通过 HandleRef 保活，跨 close 不再悬垂。
+  Loop 先销毁后仍不得启动需要访问 Loop 的新操作（孤儿契约）。
 - ~~定时器回调路径内联恢复、stop()/close() 延后恢复是否要统一~~：已在 §4.5“恢复策略”中统一
   （按唤醒来源区分，timer 现有行为即符合）。
 - sync / whenAny 额外依赖 co2 `detail`：`ForwardStop`、`LateInit`、`HandleAccess::header`、
@@ -420,14 +425,13 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
 - whenAny 在分支续体中移动分支结果：结果类型的移动构造抛异常 → `std::terminate`（续体无处报告）。
 - whenAny 与 `co2::whenAll` 各自实现；kotatsu 用一个 `when_op` 同时实现 all / any，可在 co2 侧统一。
 - sync 原语不支持跨线程使用；跨线程通信目前只能经 `scheduleOn(loop)` 回到 loop 线程再操作。
-- 计时测试有毫秒级容差（如 20ms sleep 断言 ≥18ms，libuv 时钟为毫秒截断，ASan 下偶见 19ms）。
+- timeout 功能测试已去掉毫秒级耗时断言；独立 timer 精度测试仍保留容差，不代表硬实时保证。
 - stream：无 `Tty`；Pipe 不支持 IPC（传递句柄）与 Linux 抽象套接字（`uv_pipe_bind2` 需 libuv ≥1.46，
   而最低版本为 1.40）；不能在不关闭流的情况下取消写；connect 取消会关闭流；Windows 行为未测试
   （命名管道、`uv_try_write` 语义不同）。
 - stream 依赖 libuv 的若干实现行为（已在 1.48 源码核对）：无 accept 时保留一个已接受 fd 并停止监听、
   `READING` 标志清除后读循环立即停止、关闭时以 `UV_ECANCELED` 回调 connect / write。
-- `~Loop` 无法恢复挂起中的 `Sleep`（它的 `uv_timer_t` 被当作外部句柄关闭）；可考虑让 `Sleep`
-  也登记为 LoopResident。
+- 已解决：Sleep 在请求在途期间登记 LoopResident，Loop 析构走原关闭回调并以 aborted 完成。
 - 远程投递（`schedule` / `post`）的线程若既不在 `run()` 期间、也不持有 `KeepAlive`，与 `drain()` /
   `~Loop` 竞争（`~Loop` 发现未处理的远程工作即契约违规）。
 - 保活释放竞争测试依赖 GNU ld / lld 的 `--wrap`，只在 Linux 上构建。
@@ -534,6 +538,8 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
 
 ### 实现 process 时记录
 
+以下是初版历史记录；回收/关闭语义已被后文 Review 修复和 §4.9 取代。
+
 - process 是 v0.1 完成后的新增模块，不改变原 v0.1 范围表；§7 的用户持有 Loop、通用句柄控制块
   和契约策略继续适用。不是 ReqAwaiter：uv_spawn 是同步启动 + handle 退出回调，而非单次请求。
 - 参考本地 kotatsu `src/async/io/process.cpp`，其实现使用 sys::Child、pidfd/kqueue/平台 Watch 和
@@ -546,3 +552,25 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
 - 四套构建通过；process 测试在 ASan/UBSan 额外连续 20 遍、TSan 全套 20 遍通过。
   ASan 全套并行重复曾遇旧 sync_tests.cpp:980 的 elapsed >= 9 && elapsed < 1000 计时断言失败，
   无 sanitizer 报告；未改无关测试，全套串行重复 10 遍通过。
+
+
+### Review P0/P1 修复（2026-11-07）
+
+- CloseOp 自构造到启动拥有 fd；忽略预停止和在途取消，未等待析构同步兜底。readFile/writeFile 不再在清理取消时漏 fd。
+- HandleRef 独立内部 hold 支持复制/移动，覆盖 tick/read/accept/write/recv/send/connect/shutdown/wait。
+  review 的跨 close UAF 和 Sleep 永不完成都转为回归测试。
+- fs 回调捕获异常并清理；mkstemp 调整资源转移顺序。Result 构造失败后恢复有效错误态；move-only 值的 copy traits 正确。
+- fs 取消线性化为回调读取 token；新增“回调前请求停止，但取消投递未运行”的确定性回归测试。
+- Process 改为析构后台回收、close 等待回收、detach 显式移交；Loop 先销毁会等待，可能无限阻塞，见 §4.9。
+- 新增可移植 process helper 和基本功能测试；Linux 的 FIFO/procfs/waitpid 测试按平台注册，UNIX 的 stream/req 测试单独守卫。
+  helper 作为子进程夹具关闭 sanitizer 插桩，库与父测试仍全量插桩，避免重复加载运行时和信号终止夹具的干扰。
+- co2 内部依赖集中 compat，并在配置时能力探测；构造不兼容的本地 co2 fixture 已验证配置拒绝。
+- timeout 计时断言改为结果/取消/清理语义断言，运行时间由 CTest timeout 限制。
+- 尚未解决：whenAny 的 throwing move、all/any 上游统一、install/export；Windows/macOS 仅代码分层，未实机验证。
+
+
+验证记录：21 个 CTest 项全部通过：g++/clang++ 各重复 5 遍，ASan/UBSan 并行重复 10 遍，
+TSan（halt_on_error=1）并行重复 20 遍，单项 timeout=120 秒。包括 io_uring 开/关的 fs 两遍。
+三个 build/review 复现分别转为 fs close、延迟 process wait、Sleep teardown 正式回归测试，修复前均观察到失败。
+另验证 find_package 的本地安装 co2 能力探测通过，不兼容 fixture 在配置阶段被拒绝。
+日志保留在 build/review/verified-*-tests.log；没有 Windows/macOS 执行结果。

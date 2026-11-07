@@ -350,8 +350,8 @@ class File {
     FtruncateOp truncate(std::int64_t const size) const { return FtruncateOp{loop(), fd_, size}; }
     FstatOp stat() const { return FstatOp{loop(), fd_}; }
 
-    // 异步关闭：File 立即变空，返回的 awaiter 持有 fd。不等待它则 fd 不会被关闭——
-    // 想要“即发即忘”请用 reset()（同步）或直接析构。
+    // File 立即变空，返回的 awaiter 独占 fd。关闭不受 stop_token 取消；
+    // 未被等待的 awaiter 析构时同步关闭，避免清理阶段丢失所有权。
     CloseOp close() noexcept { return CloseOp{loop(), release()}; }
 
   private:

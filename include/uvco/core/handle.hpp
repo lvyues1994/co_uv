@@ -8,6 +8,7 @@
 #include "uvco/core/config.hpp"
 #include "uvco/core/loop.hpp"
 
+// Unstarted operation awaiters retain a HandleRef from construction.
 // libuv 句柄的生命周期（docs/architecture.md §4.2），供 Timer、Stream、Udp 等复用。
 //
 // uv_close 是异步的，而析构函数无法等待。因此：

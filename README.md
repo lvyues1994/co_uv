@@ -56,5 +56,13 @@ int main() {
 包含 `<uvco/process.hpp>`。`ProcessOptions::args` 不含 argv[0]；`spawn(loop, options)` 返回
 `Result<Process>`，`CO2_AWAIT_SET(status, process.wait())` 得到退出码/信号。
 `ProcessStdio::createPipe(pipe, childReads, childWrites)` 使用现有 `Pipe` 作为父端；方向按子进程视角。
-取消 wait 不会杀子进程；必须显式 `kill(signum)`。建议先 wait 再 close；析构不杀进程，提前关闭后
-POSIX 调用者需自行回收子进程。完整生命周期语义见设计文档 §4.9。
+取消 wait 不会杀子进程；必须显式 `kill(signum)`。析构交给后台 reap-only 控制块；close 等待退出并回收，
+不再丢失回收责任。只有显式 detach() 移交回收责任。Loop 析构也等非 detach 子进程退出，可能无限阻塞；
+必要时先 kill 再 close。完整生命周期语义见设计文档 §4.9。
+
+Review 修复：关闭 fd 不可取消且 awaiter 自构造持有所有权；handle awaiter 跨 close 安全；
+Loop 析构中 Sleep 返回 aborted；fs 回调异常安全并明确取消线性化点；co2 内部接口集中兼容层及能力探测。
+
+
+本轮回归：21 个 CTest 项，g++/clang++ 各重复 5 遍、ASan/UBSan 10 遍、TSan 20 遍通过。
+Linux 专用生命周期/泄漏测试按平台注册；子进程基本功能使用项目内编译的 helper，不依赖 /bin 命令。

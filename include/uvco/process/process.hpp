@@ -174,8 +174,10 @@ class Process : public detail::Handle<detail::ProcessBlock> {
         {auto c=close();}
         return id;
     }
-    // Destruction/close never sends a signal. Pending wait must finish or be
-    // explicitly aborted with close() before destruction (same as other handles).
+    // Destruction hands a running child to a ref'ed reap-only block; close aborts
+    // pending wait and completes only after exit/reap. Neither sends a signal.
+    // Loop teardown also waits for non-detached children, potentially forever.
+    // Pending wait must finish or be explicitly aborted before owner destruction.
     detail::ProcessWaitAwaiter wait() { return detail::ProcessWaitAwaiter{block()}; }
     Result<void> kill(int signal) {
         auto& b = block();
