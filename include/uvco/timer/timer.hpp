@@ -12,6 +12,7 @@
 #include <uv.h>
 
 #include "uvco/core/cancel.hpp"
+#include "uvco/core/wait_slot.hpp"
 #include "uvco/core/config.hpp"
 #include "uvco/core/handle.hpp"
 #include "uvco/core/loop.hpp"
@@ -67,76 +68,67 @@ class TimerBlock final : public HandleBlock {
     void stop() noexcept {
         static_cast<void>(uv_timer_stop(&timer_));
         expirations_ = 0;
-        if (state_ == State::pending) finishTick(UVCO_EABORTED, Resume::later);
+        if (slot_.pending()) finishTick(UVCO_EABORTED, Resume::later);
     }
 
     // ---- tick() awaiter ----
 
     bool suspendTick(co2::coroutine_handle<> const waiter, co2::stop_token token) {
         UVCO_CONTRACT_CHECK(loop().isLoopThread());
-        UVCO_CONTRACT_CHECK(state_ == State::idle); // 一次只能有一个 tick() 等待
-        state_ = State::done;
+        UVCO_CONTRACT_CHECK(slot_.idle()); // 一次只能有一个 tick() 等待
+        slot_.begin();
         if (token.stop_requested()) {
-            status_ = UV_ECANCELED;
+            slot_.set(Errc::canceled);
             return false;
         }
         if (expirations_ != 0) {
-            status_ = 0;
-            taken_ = std::exchange(expirations_, 0);
+            slot_.set(std::exchange(expirations_, 0));
             return false;
         }
         if (uv_is_active(reinterpret_cast<uv_handle_t const*>(&timer_)) == 0) {
-            status_ = UV_EINVAL; // 未启动：永远不会到期
+            slot_.set(Errc::invalid_argument); // 未启动：永远不会到期
             return false;
         }
-        state_ = State::pending;
-        waiter_ = waiter;
-        suspended_ = true;
+        slot_.pend(waiter);
         opBegin();
         cancel_.arm(loop(), std::move(token), &TimerBlock::onCancel, this);
         return true;
     }
 
     Result<std::uint64_t> resumeTick() noexcept {
-        UVCO_CONTRACT_CHECK(state_ == State::done);
         cancel_.disarm();
-        Result<std::uint64_t> result = status_ < 0 ? Result<std::uint64_t>{static_cast<Errc>(status_)}
-                                                   : Result<std::uint64_t>{taken_};
-        state_ = State::idle;
-        waiter_ = nullptr;
-        taken_ = 0;
-        if (std::exchange(suspended_, false)) opEnd(); // 之后 this 可能已被释放
-        return result;
+        auto taken = slot_.take();
+        if (taken.suspended) opEnd(); // no this access afterwards
+        return std::move(taken.result);
     }
 
   private:
-    enum class State : unsigned char { idle, pending, done };
     enum class Resume : unsigned char { inlineNow, later };
 
     uv_handle_t* uvHandle() noexcept override { return reinterpret_cast<uv_handle_t*>(&timer_); }
 
     void abortPending() noexcept override {
-        if (state_ == State::pending) finishTick(UVCO_EABORTED, Resume::later);
+        if (slot_.pending()) finishTick(UVCO_EABORTED, Resume::later);
     }
 
     static void onTimer(uv_timer_t* const timer) noexcept {
         auto& self = fromData<TimerBlock>(timer->data);
         ++self.expirations_;
-        if (self.state_ == State::pending) {
-            self.taken_ = std::exchange(self.expirations_, 0);
+        if (self.slot_.pending()) {
             self.finishTick(0, Resume::inlineNow); // 之后不再访问 self
         }
     }
 
     static void onCancel(void* const context) {
         auto* const self = static_cast<TimerBlock*>(context);
-        if (self->state_ == State::pending) self->finishTick(UV_ECANCELED, Resume::inlineNow);
+        if (self->slot_.pending()) self->finishTick(UV_ECANCELED, Resume::inlineNow);
     }
 
     void finishTick(int const status, Resume const how) noexcept {
-        status_ = status;
-        state_ = State::done;
-        co2::coroutine_handle<> const waiter = waiter_;
+        Result<std::uint64_t> result = status < 0
+            ? Result<std::uint64_t>{static_cast<Errc>(status)}
+            : Result<std::uint64_t>{std::exchange(expirations_, 0)};
+        auto const waiter = slot_.complete(std::move(result));
         if (how == Resume::later)
             resumeLater(waiter);
         else
@@ -145,11 +137,7 @@ class TimerBlock final : public HandleBlock {
 
     uv_timer_t timer_{};
     std::uint64_t expirations_ = 0;
-    std::uint64_t taken_ = 0;
-    co2::coroutine_handle<> waiter_;
-    int status_ = 0;
-    State state_ = State::idle;
-    bool suspended_ = false;
+    WaitSlot<std::uint64_t> slot_;
     CancelHook cancel_;
 };
 
