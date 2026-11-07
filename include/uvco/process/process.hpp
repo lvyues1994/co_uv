@@ -10,6 +10,7 @@
 #include <uv.h>
 #include <co2/env.hpp>
 #include "uvco/core/handle.hpp"
+#include "uvco/core/wait_slot.hpp"
 #include "uvco/core/cancel.hpp"
 #include "uvco/core/result.hpp"
 #include "uvco/stream/pipe.hpp"
@@ -66,22 +67,20 @@ class ProcessBlock final : public HandleBlock {
         return status;
     }
     bool begin(co2::coroutine_handle<> waiter, bool stopped) {
-        UVCO_CONTRACT_CHECK(not active_);
-        active_ = true;
+        UVCO_CONTRACT_CHECK(slot_.idle());
+        slot_.begin();
         opBegin();
-        result_ = closing() ? Result<ExitStatus>{Errc::aborted} :
-                  stopped ? Result<ExitStatus>{Errc::canceled} : Result<ExitStatus>{exit_};
+        slot_.set(closing() ? Result<ExitStatus>{Errc::aborted} :
+                  stopped ? Result<ExitStatus>{Errc::canceled} : Result<ExitStatus>{exit_});
         if (closing() || stopped || exited_) return false;
-        waiter_ = waiter;
-        waiting_ = true;
+        slot_.pend(waiter);
         return true;
     }
     void cancel() noexcept { finish(Errc::canceled, false); }
     Result<ExitStatus> take() {
-        auto result = result_;
-        active_ = false;
+        auto taken = slot_.take();
         opEnd();
-        return result;
+        return std::move(taken.result);
     }
     bool exited() const noexcept { return exited_; }
     void abandon() noexcept {
@@ -103,10 +102,8 @@ class ProcessBlock final : public HandleBlock {
     uv_handle_t* uvHandle() noexcept override { return reinterpret_cast<uv_handle_t*>(&handle); }
     void abortPending() noexcept override { finish(Errc::aborted, false); }
     void finish(Result<ExitStatus> result, bool inlineResume) noexcept {
-        if (not waiting_) return;
-        waiting_ = false;
-        result_ = result;
-        auto waiter = std::exchange(waiter_, {});
+        if (not slot_.pending()) return;
+        auto const waiter = slot_.complete(std::move(result));
         if (inlineResume) waiter.resume();
         else resumeLater(waiter);
     }
@@ -119,12 +116,9 @@ class ProcessBlock final : public HandleBlock {
     }
     bool reapOnly_ = false;
     bool teardown_ = false;
-    bool active_ = false;
     bool exited_ = false;
-    bool waiting_ = false;
     ExitStatus exit_;
-    Result<ExitStatus> result_;
-    co2::coroutine_handle<> waiter_;
+    WaitSlot<ExitStatus> slot_;
 };
 
 class ProcessWaitAwaiter {
