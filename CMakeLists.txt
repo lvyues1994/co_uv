@@ -104,6 +104,7 @@ if(UVCO_ENABLE_INSTALL)
     set(_uvco_package_dir "${CMAKE_INSTALL_LIBDIR}/cmake/uvco")
     install(TARGETS uvco EXPORT uvcoTargets COMPONENT uvco)
     install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} COMPONENT uvco)
+    install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/uvco COMPONENT uvco)
     install(EXPORT uvcoTargets FILE uvcoTargets.cmake NAMESPACE uvco::
         DESTINATION ${_uvco_package_dir} COMPONENT uvco)
     configure_package_config_file(cmake/uvcoConfig.cmake.in
