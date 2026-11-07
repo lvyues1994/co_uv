@@ -1,0 +1,231 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux / ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: gcc-debug, cc: gcc, cxx: g++, type: Debug, deps: system, sanitizer: none, flags: ''}
+          - {name: gcc-release, cc: gcc, cxx: g++, type: Release, deps: system, sanitizer: none, flags: ''}
+          - {name: clang-debug, cc: clang, cxx: clang++, type: Debug, deps: system, sanitizer: none, flags: ''}
+          - {name: clang-release, cc: clang, cxx: clang++, type: Release, deps: system, sanitizer: none, flags: ''}
+          - name: asan-ubsan
+            cc: clang
+            cxx: clang++
+            type: Debug
+            deps: system
+            sanitizer: address
+            flags: -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all
+          - name: tsan
+            cc: clang
+            cxx: clang++
+            type: Debug
+            deps: system
+            sanitizer: thread
+            flags: -fsanitize=thread -fno-omit-frame-pointer -fno-sanitize-recover=all
+          - {name: fetched-deps, cc: gcc, cxx: g++, type: Debug, deps: fetch, sanitizer: none, flags: ''}
+    defaults:
+      run:
+        shell: bash
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+      BUILD_TYPE: ${{ matrix.type }}
+      DEP_MODE: ${{ matrix.deps }}
+      SAN_FLAGS: ${{ matrix.flags }}
+      CCACHE_DIR: ${{ github.workspace }}/build/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_MAXSIZE: 500M
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+      TSAN_OPTIONS: halt_on_error=1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Prepare directories
+        run: mkdir -p build/logs build/tmp
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            build/.ccache
+            build/ci/_deps/co2-src
+            build/ci/_deps/libuv-src
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ matrix.name }}-ci1-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-${{ matrix.name }}-ci1-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-
+      - name: Install Linux tools and check apt libuv
+        run: |
+          sudo apt-get update 2>&1 | tee build/logs/apt-update.log
+          sudo apt-get install -y g++ clang ninja-build pkg-config ccache libuv1-dev curl 2>&1 | tee build/logs/tools.log
+          if pkg-config --atleast-version=1.40 libuv; then
+            pkg-config --modversion libuv
+          else
+            # Do not accept an old apt package; install the project's pinned libuv.
+            curl --fail --location --retry 3 https://dist.libuv.org/dist/v1.48.0/libuv-v1.48.0.tar.gz -o build/libuv.tar.gz
+            echo '7f1db8ac368d89d1baf163bac1ea5fe5120697a73910c8ae6b2fffb3551d59fb  build/libuv.tar.gz' | sha256sum --check
+            tar -xzf build/libuv.tar.gz -C build
+            cmake -S build/libuv-v1.48.0 -B build/libuv-build -G Ninja \
+              -DLIBUV_BUILD_TESTS=OFF -DLIBUV_BUILD_BENCH=OFF -DLIBUV_BUILD_SHARED=OFF \
+              -DCMAKE_INSTALL_PREFIX="$PWD/build/deps" 2>&1 | tee build/logs/libuv-configure.log
+            cmake --build build/libuv-build --parallel 2 2>&1 | tee build/logs/libuv-build.log
+            cmake --install build/libuv-build 2>&1 | tee build/logs/libuv-install.log
+          fi
+      - name: TSan shadow-map compatibility on ephemeral runner
+        if: matrix.sanitizer == 'thread'
+        # LLVM TSan can conflict with Ubuntu's 32-bit mmap randomization.
+        # This is runner-local; never suppress or retry sanitizer reports.
+        run: sudo sysctl -w vm.mmap_rnd_bits=28 2>&1 | tee build/logs/tsan-runner.log
+      - name: Configure
+        run: |
+          args=(-S . -B build/ci -G Ninja
+            "-DCMAKE_BUILD_TYPE=$BUILD_TYPE" "-DCMAKE_C_COMPILER=$CC" "-DCMAKE_CXX_COMPILER=$CXX"
+            "-DCMAKE_CXX_FLAGS=$SAN_FLAGS" -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+            "-DCMAKE_PREFIX_PATH=$PWD/build/deps" -DUVCO_BUILD_TESTS=ON -DUVCO_ENABLE_INSTALL=ON)
+          if [[ "$DEP_MODE" == fetch ]]; then
+            args+=(-DCMAKE_DISABLE_FIND_PACKAGE_co2=TRUE -DCMAKE_DISABLE_FIND_PACKAGE_libuv=TRUE
+              -DCMAKE_DISABLE_FIND_PACKAGE_PkgConfig=TRUE -DLIBUV_BUILD_SHARED=OFF)
+          fi
+          cmake "${args[@]}" 2>&1 | tee build/logs/configure.log
+      - name: Build all tests and standalone headers
+        run: cmake --build build/ci --parallel 2 2>&1 | tee build/logs/build.log
+      - name: Stage fetched dependencies independently for installed consumers
+        if: matrix.deps == 'fetch'
+        run: |
+          cmake --install build/ci/_deps/co2-build --prefix "$PWD/build/deps" 2>&1 | tee build/logs/co2-install.log
+          cmake --install build/ci/_deps/libuv-build --prefix "$PWD/build/deps" 2>&1 | tee build/logs/libuv-install.log
+      - name: Test including install/relocation/consumer and two-TU checks
+        run: ctest --test-dir build/ci --output-on-failure --timeout 180 2>&1 | tee build/logs/ctest.log
+      - name: Cache statistics
+        if: always()
+        run: ccache --show-stats
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: logs-linux-${{ matrix.name }}
+          if-no-files-found: ignore
+          retention-days: 14
+          path: |
+            build/**/*.log
+            build/**/CMakeConfigureLog.yaml
+            build/**/CMakeCache.txt
+            build/**/Testing/Temporary/*
+
+  macos-experimental:
+    name: macOS / experimental (non-blocking)
+    runs-on: macos-latest
+    continue-on-error: true
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/build/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_MAXSIZE: 500M
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: mkdir -p build/logs build/tmp
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            build/.ccache
+            build/ci/_deps/co2-src
+          key: ${{ runner.os }}-${{ runner.arch }}-ci1-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-ci1-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-
+      - run: brew install libuv pkg-config ccache ninja 2>&1 | tee build/logs/tools.log
+      - name: Configure
+        run: |
+          cmake -S . -B build/ci -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DUVCO_BUILD_TESTS=ON -DUVCO_ENABLE_INSTALL=ON \
+            "-DCMAKE_PREFIX_PATH=$(brew --prefix libuv);$PWD/build/deps" 2>&1 | tee build/logs/configure.log
+      - run: cmake --build build/ci --parallel 2 2>&1 | tee build/logs/build.log
+      - run: ctest --test-dir build/ci --output-on-failure --timeout 180 2>&1 | tee build/logs/ctest.log
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: logs-macos-experimental
+          if-no-files-found: ignore
+          retention-days: 14
+          path: |
+            build/**/*.log
+            build/**/CMakeConfigureLog.yaml
+            build/**/CMakeCache.txt
+            build/**/Testing/Temporary/*
+
+  windows-experimental:
+    name: Windows MSVC / experimental (non-blocking)
+    runs-on: windows-latest
+    continue-on-error: true
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: New-Item -ItemType Directory -Force build/logs, build/tmp | Out-Null
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            build/ci/_deps/co2-src
+            build/ci/_deps/libuv-src
+          key: ${{ runner.os }}-${{ runner.arch }}-msvc-ci1-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-msvc-ci1-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+      - name: Configure fetched static libuv and co2
+        run: |
+          cmake -S . -B build/ci -G Ninja -DCMAKE_BUILD_TYPE=Debug `
+            -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
+            -DCMAKE_DISABLE_FIND_PACKAGE_co2=TRUE -DCMAKE_DISABLE_FIND_PACKAGE_libuv=TRUE `
+            -DCMAKE_DISABLE_FIND_PACKAGE_PkgConfig=TRUE -DLIBUV_BUILD_SHARED=OFF `
+            -DUVCO_BUILD_TESTS=ON -DUVCO_ENABLE_INSTALL=ON `
+            "-DCMAKE_PREFIX_PATH=$($PWD.Path)/build/deps" 2>&1 | Tee-Object build/logs/configure.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build
+        run: |
+          cmake --build build/ci --parallel 2 2>&1 | Tee-Object build/logs/build.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Stage dependencies for installed consumers
+        run: |
+          cmake --install build/ci/_deps/co2-build --prefix "$($PWD.Path)/build/deps" 2>&1 | Tee-Object build/logs/co2-install.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --install build/ci/_deps/libuv-build --prefix "$($PWD.Path)/build/deps" 2>&1 | Tee-Object build/logs/libuv-install.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test including installed consumer
+        run: |
+          ctest --test-dir build/ci --output-on-failure --timeout 180 2>&1 | Tee-Object build/logs/ctest.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: logs-windows-experimental
+          if-no-files-found: ignore
+          retention-days: 14
+          path: |
+            build/**/*.log
+            build/**/CMakeConfigureLog.yaml
+            build/**/CMakeCache.txt
+            build/**/Testing/Temporary/*
