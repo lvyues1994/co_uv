@@ -17,6 +17,7 @@
 #include "uvco/core/config.hpp"
 #include "uvco/core/error.hpp"
 #include "uvco/core/handle.hpp"
+#include "uvco/core/wait_slot.hpp"
 #include "uvco/core/loop.hpp"
 #include "uvco/core/req_awaiter.hpp"
 #include "uvco/core/result.hpp"
@@ -69,51 +70,40 @@ class StreamBlock : public HandleBlock {
     bool suspendRead(co2::coroutine_handle<> const waiter, MutableBuffer const buf,
                      co2::stop_token token) {
         UVCO_CONTRACT_CHECK(loop().isLoopThread());
-        if (readState_ != State::idle)
+        if (not readSlot_.idle())
             UVCO_CONTRACT_FAIL("uvco stream: concurrent read() on the same stream");
         UVCO_CONTRACT_CHECK(buf.data != nullptr && buf.size != 0);
-        readState_ = State::done;
-        readSuspended_ = false;
+        readSlot_.begin();
         if (token.stop_requested()) {
-            readStatus_ = UV_ECANCELED;
+            readSlot_.set(static_cast<Errc>(static_cast<int>(UV_ECANCELED)));
             return false;
         }
         if (closing()) {
-            readStatus_ = UV_EBADF;
+            readSlot_.set(static_cast<Errc>(static_cast<int>(UV_EBADF)));
             return false;
         }
         if (readEnd_ != 0) { // EOF / 错误是粘性的
-            readStatus_ = readEnd_;
+            readSlot_.set(static_cast<Errc>(static_cast<int>(readEnd_)));
             return false;
         }
         int const status = uv_read_start(stream(), &StreamBlock::onAlloc, &StreamBlock::onRead);
         if (status < 0) {
-            readStatus_ = status;
+            readSlot_.set(static_cast<Errc>(static_cast<int>(status)));
             return false;
         }
         readBuf_ = buf;
-        readWaiter_ = waiter;
-        readState_ = State::pending;
-        readSuspended_ = true;
+        readSlot_.pend(waiter);
         opBegin();
         readCancel_.arm(loop(), std::move(token), &StreamBlock::onReadCancel, this);
         return true;
     }
 
     Result<std::size_t> resumeRead() noexcept {
-        UVCO_CONTRACT_CHECK(readState_ == State::done);
         readCancel_.disarm();
-        ssize_t const status = readStatus_;
-        bool const suspended = readSuspended_;
-        readState_ = State::idle;
-        readSuspended_ = false;
-        readWaiter_ = nullptr;
+        auto taken = readSlot_.take();
         readBuf_ = MutableBuffer{};
-        Result<std::size_t> result =
-            status < 0 ? Result<std::size_t>{static_cast<Errc>(static_cast<int>(status))}
-                       : Result<std::size_t>{static_cast<std::size_t>(status)};
-        if (suspended) opEnd(); // 最后一步：之后控制块可能已被释放
-        return result;
+        if (taken.suspended) opEnd();
+        return std::move(taken.result);
     }
 
     // ---- listen / accept ----
@@ -128,34 +118,31 @@ class StreamBlock : public HandleBlock {
 
     bool suspendAccept(co2::coroutine_handle<> const waiter, co2::stop_token token) {
         UVCO_CONTRACT_CHECK(loop().isLoopThread());
-        if (acceptState_ != State::idle)
+        if (not acceptSlot_.idle())
             UVCO_CONTRACT_FAIL("uvco stream: concurrent accept() on the same stream");
-        acceptState_ = State::done;
-        acceptSuspended_ = false;
+        acceptSlot_.begin();
         if (token.stop_requested()) {
-            acceptStatus_ = UV_ECANCELED;
+            acceptSlot_.set(acceptResult(UV_ECANCELED));
             return false;
         }
         if (closing()) {
-            acceptStatus_ = UV_EBADF;
+            acceptSlot_.set(acceptResult(UV_EBADF));
             return false;
         }
         if (not listening_) {
-            acceptStatus_ = UV_EINVAL;
+            acceptSlot_.set(acceptResult(UV_EINVAL));
             return false;
         }
         if (listenError_ != 0) {
-            acceptStatus_ = std::exchange(listenError_, 0);
+            acceptSlot_.set(acceptResult(std::exchange(listenError_, 0)));
             return false;
         }
         int const status = tryAccept();
         if (status != UV_EAGAIN) {
-            acceptStatus_ = status;
+            acceptSlot_.set(acceptResult(status));
             return false;
         }
-        acceptWaiter_ = waiter;
-        acceptState_ = State::pending;
-        acceptSuspended_ = true;
+        acceptSlot_.pend(waiter);
         opBegin();
         acceptCancel_.arm(loop(), std::move(token), &StreamBlock::onAcceptCancel, this);
         return true;
@@ -163,18 +150,10 @@ class StreamBlock : public HandleBlock {
 
     // 成功时返回新连接的控制块（调用者接管所有权）。
     Result<StreamBlock*> resumeAccept() noexcept {
-        UVCO_CONTRACT_CHECK(acceptState_ == State::done);
         acceptCancel_.disarm();
-        int const status = acceptStatus_;
-        StreamBlock* const peer = std::exchange(accepted_, nullptr);
-        bool const suspended = acceptSuspended_;
-        acceptState_ = State::idle;
-        acceptSuspended_ = false;
-        acceptWaiter_ = nullptr;
-        Result<StreamBlock*> result =
-            status < 0 ? Result<StreamBlock*>{static_cast<Errc>(status)} : Result<StreamBlock*>{peer};
-        if (suspended) opEnd();
-        return result;
+        auto taken = acceptSlot_.take();
+        if (taken.suspended) opEnd();
+        return std::move(taken.result);
     }
 
   protected:
@@ -186,13 +165,12 @@ class StreamBlock : public HandleBlock {
 
     void abortPending() noexcept override {
         // uv_close 已经停止读和监听。
-        if (readState_ == State::pending) finishRead(UVCO_EABORTED, Resume::later);
-        if (acceptState_ == State::pending) finishAccept(UVCO_EABORTED, Resume::later);
+        if (readSlot_.pending()) finishRead(UVCO_EABORTED, Resume::later);
+        if (acceptSlot_.pending()) finishAccept(UVCO_EABORTED, Resume::later);
         if (peer_ != nullptr) static_cast<void>(std::exchange(peer_, nullptr)->release({}));
     }
 
   private:
-    enum class State : unsigned char { idle, pending, done };
     enum class Resume : unsigned char { inlineNow, later };
 
     static constexpr std::size_t maxBufLen() noexcept {
@@ -204,7 +182,7 @@ class StreamBlock : public HandleBlock {
 
     static void onAlloc(uv_handle_t* const handle, std::size_t, uv_buf_t* const buf) noexcept {
         StreamBlock& self = fromData<StreamBlock>(handle->data);
-        if (self.readState_ == State::pending) {
+        if (self.readSlot_.pending()) {
             std::size_t const size =
                 self.readBuf_.size < maxBufLen() ? self.readBuf_.size : maxBufLen();
             *buf = makeUvBuf(self.readBuf_.data, size); // 直接读进读者的缓冲区
@@ -219,7 +197,7 @@ class StreamBlock : public HandleBlock {
         StreamBlock& self = fromData<StreamBlock>(stream->data);
         if (nread == 0) return; // EAGAIN：继续等
         static_cast<void>(uv_read_stop(stream));
-        if (self.readState_ != State::pending) {
+        if (not self.readSlot_.pending()) {
             UVCO_CONTRACT_CHECK(nread < 0); // 没有交出过缓冲区，不可能读到数据
             if (nread != UV_ENOBUFS) self.readEnd_ = nread;
             return;
@@ -230,15 +208,16 @@ class StreamBlock : public HandleBlock {
 
     static void onReadCancel(void* const context) noexcept {
         auto& self = *static_cast<StreamBlock*>(context);
-        if (self.readState_ != State::pending) return;
+        if (not self.readSlot_.pending()) return;
         static_cast<void>(uv_read_stop(self.stream()));
         self.finishRead(UV_ECANCELED, Resume::inlineNow);
     }
 
     void finishRead(ssize_t const status, Resume const how) noexcept {
-        readStatus_ = status;
-        readState_ = State::done;
-        co2::coroutine_handle<> const waiter = readWaiter_;
+        Result<std::size_t> result = status < 0
+            ? Result<std::size_t>{static_cast<Errc>(static_cast<int>(status))}
+            : Result<std::size_t>{static_cast<std::size_t>(status)};
+        auto const waiter = readSlot_.complete(std::move(result));
         if (how == Resume::inlineNow)
             waiter.resume(); // 之后不再访问 this
         else
@@ -256,14 +235,14 @@ class StreamBlock : public HandleBlock {
     static void onConnection(uv_stream_t* const server, int const status) noexcept {
         StreamBlock& self = fromData<StreamBlock>(server->data);
         if (status < 0) {
-            if (self.acceptState_ == State::pending)
+            if (self.acceptSlot_.pending())
                 self.finishAccept(status, Resume::inlineNow);
             else
                 self.listenError_ = status;
             return;
         }
         // 没有 accept 挂起：libuv 保留这个连接，暂停监听直到下一次 uv_accept。
-        if (self.acceptState_ != State::pending) return;
+        if (not self.acceptSlot_.pending()) return;
         int const accepted = self.tryAccept();
         if (accepted == UV_EAGAIN) return;
         self.finishAccept(accepted, Resume::inlineNow);
@@ -271,14 +250,16 @@ class StreamBlock : public HandleBlock {
 
     static void onAcceptCancel(void* const context) noexcept {
         auto& self = *static_cast<StreamBlock*>(context);
-        if (self.acceptState_ != State::pending) return;
+        if (not self.acceptSlot_.pending()) return;
         self.finishAccept(UV_ECANCELED, Resume::inlineNow);
     }
 
+    Result<StreamBlock*> acceptResult(int status) noexcept {
+        return status < 0 ? Result<StreamBlock*>{static_cast<Errc>(status)}
+                          : Result<StreamBlock*>{std::exchange(accepted_, nullptr)};
+    }
     void finishAccept(int const status, Resume const how) noexcept {
-        acceptStatus_ = status;
-        acceptState_ = State::done;
-        co2::coroutine_handle<> const waiter = acceptWaiter_;
+        auto const waiter = acceptSlot_.complete(acceptResult(status));
         if (how == Resume::inlineNow)
             waiter.resume();
         else
@@ -286,22 +267,16 @@ class StreamBlock : public HandleBlock {
     }
 
     // read
-    co2::coroutine_handle<> readWaiter_;
+    WaitSlot<std::size_t> readSlot_;
     MutableBuffer readBuf_;
-    ssize_t readStatus_ = 0;
     ssize_t readEnd_ = 0; // 0，或粘性的 UV_EOF / 错误码
-    State readState_ = State::idle;
-    bool readSuspended_ = false;
     CancelHook readCancel_;
 
     // accept
-    co2::coroutine_handle<> acceptWaiter_;
+    WaitSlot<StreamBlock*> acceptSlot_;
     StreamBlock* peer_ = nullptr;     // 预先创建的 accept 目标
     StreamBlock* accepted_ = nullptr; // 已接受、等待交给 accept() 的连接
-    int acceptStatus_ = 0;
     int listenError_ = 0;
-    State acceptState_ = State::idle;
-    bool acceptSuspended_ = false;
     bool listening_ = false;
     CancelHook acceptCancel_;
 };
