@@ -8,3 +8,5 @@
 #include "uvco/sync/timeout.hpp"
 #include "uvco/sync/wait_queue.hpp"
 #include "uvco/sync/when_any.hpp"
+
+#include "uvco/sync/when_all_results.hpp"

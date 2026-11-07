@@ -318,8 +318,8 @@ template <class Sink> void deliver(::uvco::detail::co2compat::ResultStorage<void
 struct RaceState {
     static constexpr std::size_t none = ~std::size_t{0};
 
-    RaceState() = default;
-    RaceState(RaceState&& other) noexcept : source{std::move(other.source)} {
+    explicit RaceState(bool const any = true) noexcept : stopOnSuccess{any} {}
+    RaceState(RaceState&& other) noexcept : source{std::move(other.source)}, stopOnSuccess{other.stopOnSuccess} {
         UVCO_CONTRACT_CHECK(not other.awaiting);
     }
     RaceState(RaceState const&) = delete;
@@ -352,7 +352,8 @@ struct RaceState {
         if (end == BranchEnd::error)
             firstError.compare_exchange_strong(expected, index, std::memory_order_acq_rel);
         expected = none;
-        if (decider.compare_exchange_strong(expected, index, std::memory_order_acq_rel))
+        if ((stopOnSuccess || end != BranchEnd::success) &&
+            decider.compare_exchange_strong(expected, index, std::memory_order_acq_rel))
             source.request_stop();
         if (remaining.fetch_sub(1U, std::memory_order_acq_rel) == 1U) return awaiting;
         return nullptr;
@@ -371,6 +372,7 @@ struct RaceState {
     co2::stop_source source;
     ::uvco::detail::co2compat::LateInit<co2::stop_callback<::uvco::detail::co2compat::ForwardStop>> forwarding;
     bool stoppedEarly{false};
+    bool stopOnSuccess{true};
 };
 
 // 每个分支的续体帧：标准布局，首成员是帧头。
