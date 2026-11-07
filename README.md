@@ -1,8 +1,7 @@
 # uvco
 
-[![CI（OWNER/REPO 占位）](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
+[![CI](https://github.com/lvyues1994/co_uv/actions/workflows/ci.yml/badge.svg)](https://github.com/lvyues1994/co_uv/actions/workflows/ci.yml)
 
-> 仓库尚未发布；发布到 GitHub 后将 badge 的 `OWNER/REPO` 替换为实际路径。
 
 基于 [co2](https://github.com/lvyues1994/coro)（C++14 无栈协程库）对 libuv 的协程封装。
 设计见 [docs/architecture.md](docs/architecture.md)。
