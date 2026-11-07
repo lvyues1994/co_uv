@@ -6,7 +6,7 @@ namespace {
 uvco::ProcessOptions command(std::string mode,std::string arg={}){uvco::ProcessOptions p;p.file=UVCO_TEST_PROCESS_HELPER;p.args={std::move(mode),std::move(arg)};return p;}
 auto timed(uvco::Loop& loop,uvco::CaptureCancel action)
  CO2_BEG(co2::Task<uvco::Result<uvco::CaptureResult>>,(loop,action),uvco::CaptureOptions io;uvco::Result<uvco::CaptureResult> r;) {
- io.cancel=action;CO2_AWAIT_SET(r,uvco::timeout(loop,std::chrono::milliseconds{0},uvco::capture(loop,command("sleep","0.1"),std::move(io))));CO2_RETURN(std::move(r));
+ io.cancel=action;io.input=std::string(1048576,'x');CO2_AWAIT_SET(r,uvco::timeout(loop,std::chrono::milliseconds{0},uvco::capture(loop,command("sleep","0.1"),std::move(io))));CO2_RETURN(std::move(r));
 } CO2_END
 }
 TEST_CASE("communicate concurrently drains both outputs while writing stdin"){
@@ -28,5 +28,10 @@ TEST_CASE("capture cancellation options drain IO without changing default reap")
 }
 TEST_CASE("capture spawn error stays a Result"){
  uvco::Loop loop;uvco::ProcessOptions p;p.file="/uvco-no-such-program";auto r=uvco::run(loop,uvco::capture(loop,std::move(p)));CHECK(!r);
+}
+
+TEST_CASE("capture stderr cap is independent of stdout cap"){
+ uvco::Loop loop;uvco::CaptureOptions io;io.stderrLimit=4;
+ auto r=uvco::run(loop,uvco::capture(loop,command("duplex"),std::move(io)));CHECK(!r);CHECK(r.error()==static_cast<uvco::Errc>(UV_ENOBUFS));loop.runUntilIdle();
 }
 UVCO_TEST_MAIN

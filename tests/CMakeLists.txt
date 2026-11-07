@@ -150,3 +150,32 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_test(NAME uvco-dir-fault-tests COMMAND uvco-dir-fault-tests)
     unset(_uvco_new_symbol)
 endif()
+
+# The output-string fault fixture wraps a libstdc++ C++11-ABI append symbol.
+# Only this fixture is ABI-specific; ordinary capture tests remain portable.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    check_cxx_source_compiles("#include <string>
+#if !defined(__GLIBCXX__) || !_GLIBCXX_USE_CXX11_ABI
+#error unsupported string ABI
+#endif
+int main() {}" UVCO_TEST_GLIBCXX_ABI)
+    if(UVCO_TEST_GLIBCXX_ABI)
+        add_executable(uvco-capture-fault-tests capture_fault_tests.cpp)
+        uvco_configure_test(uvco-capture-fault-tests)
+        # Preserve the intercepted append boundary even in Release builds.
+        target_compile_options(uvco-capture-fault-tests PRIVATE -fno-inline)
+        add_dependencies(uvco-capture-fault-tests uvco-process-helper)
+        if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+            set(_uvco_append_symbol _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE6appendEPKcm)
+        else()
+            set(_uvco_append_symbol _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE6appendEPKcj)
+        endif()
+        target_compile_definitions(uvco-capture-fault-tests PRIVATE
+            UVCO_TEST_PROCESS_HELPER="$<TARGET_FILE:uvco-process-helper>"
+            UVCO_TEST_APPEND_SYMBOL="${_uvco_append_symbol}")
+        target_link_options(uvco-capture-fault-tests PRIVATE "-Wl,--wrap=uv_read_start" "-Wl,--wrap=${_uvco_append_symbol}")
+        add_test(NAME uvco-capture-fault-tests COMMAND uvco-capture-fault-tests)
+        set_tests_properties(uvco-capture-fault-tests PROPERTIES TIMEOUT 30)
+        unset(_uvco_append_symbol)
+    endif()
+endif()
