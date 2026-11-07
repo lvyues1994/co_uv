@@ -15,6 +15,13 @@
 #include "uvco/core/result.hpp"
 #include "uvco/stream/pipe.hpp"
 
+#ifndef _WIN32
+#include <cerrno>
+#include <csignal>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
 namespace uvco {
 
 struct ExitStatus {
@@ -49,6 +56,7 @@ struct ProcessOptions {
     std::string cwd;
     std::vector<ProcessStdio> stdio; // default: ignore stdin/stdout/stderr
     bool detached = false;
+    bool privateGroup = false; // POSIX private session/group, ownership/reaping unchanged
     bool setUid = false;
     bool setGid = false;
     uv_uid_t uid = 0;
@@ -60,6 +68,7 @@ class ProcessBlock final : public HandleBlock {
   public:
     explicit ProcessBlock(Loop& loop) : HandleBlock{loop} {}
     uv_process_t handle{};
+    bool privateGroup = false;
     int start(uv_process_options_t& options) {
         options.exit_cb = &ProcessBlock::onExit;
         int const status = uv_spawn(loop().raw(), &handle, &options);
@@ -179,6 +188,32 @@ class Process : public detail::Handle<detail::ProcessBlock> {
         if (b.exited()) return static_cast<Errc>(UV_ESRCH);
         return fromStatus(uv_process_kill(&b.handle, signal));
     }
+    // Best-effort private group, not containment: descendants can escape with
+    // setsid/setpgid. Never address an old PGID after leader exit/reap.
+    Result<void> signalGroup(int signal) {
+        auto& b=block();
+#ifdef _WIN32
+        static_cast<void>(signal);static_cast<void>(b);
+        return static_cast<Errc>(UV_ENOTSUP); // private Windows Job backend is separate work
+#else
+        if(!b.privateGroup)return static_cast<Errc>(UV_ENOTSUP);
+        if(b.closing())return Errc::aborted;
+        if(b.exited())return static_cast<Errc>(UV_ESRCH);
+        if(signal<0)return Errc::invalid_argument;
+#if defined(WNOWAIT)
+        siginfo_t info{};int status;
+        do {status=waitid(P_PID,static_cast<id_t>(b.handle.pid),&info,WEXITED|WNOHANG|WNOWAIT);} while(status<0 && errno==EINTR);
+        if(status<0)return static_cast<Errc>(errno==ECHILD?UV_ESRCH:uv_translate_sys_error(errno));
+        if(info.si_pid!=0)return static_cast<Errc>(UV_ESRCH);
+        // Sole-reaper + loop-thread contract: no libuv reap can interleave this
+        // non-reaping probe and kill. A child exiting meanwhile remains a zombie
+        // and pins its PID. Foreign waitpid/SA_NOCLDWAIT owners are unsupported.
+        return fromStatus(::kill(-b.handle.pid,signal)==0?0:uv_translate_sys_error(errno));
+#else
+        return static_cast<Errc>(UV_ENOTSUP); // do not substitute kill(pid,0) identity probing
+#endif
+#endif
+    }
     uv_pid_t pid() const { return block().handle.pid; }
   private:
     void abandon() noexcept { auto* b=takeBlock(); if(b) b->abandon(); }
@@ -188,6 +223,9 @@ class Process : public detail::Handle<detail::ProcessBlock> {
 
 inline Result<Process> spawn(Loop& loop, ProcessOptions options) {
     UVCO_CONTRACT_CHECK(loop.isLoopThread());
+#ifdef _WIN32
+    if(options.privateGroup)return static_cast<Errc>(UV_ENOTSUP);
+#endif
     if (options.file.empty() || options.file.find('\0') != std::string::npos)
         return Errc::invalid_argument;
     std::vector<char*> args;
@@ -231,12 +269,13 @@ inline Result<Process> spawn(Loop& loop, ProcessOptions options) {
     raw.cwd = options.cwd.empty() ? nullptr : options.cwd.c_str();
     raw.stdio_count = static_cast<int>(stdio.size());
     raw.stdio = stdio.data();
-    if (options.detached) raw.flags |= UV_PROCESS_DETACHED;
+    if (options.detached || options.privateGroup) raw.flags |= UV_PROCESS_DETACHED;
     if (options.setUid) raw.flags |= UV_PROCESS_SETUID;
     if (options.setGid) raw.flags |= UV_PROCESS_SETGID;
     raw.uid = options.uid;
     raw.gid = options.gid;
     auto* b = new detail::ProcessBlock{loop};
+    b->privateGroup=options.privateGroup || options.detached;
     int const status = b->start(raw);
     if (status < 0) {
         b->closeInternally(); // no child exists, hence no exit callback to await
