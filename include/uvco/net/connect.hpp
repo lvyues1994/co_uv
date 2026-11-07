@@ -124,6 +124,13 @@ inline auto connectWorker(ConnectRaceState& s,ConnectSlot& slot)
         if(result){CO2_AWAIT(result->close());}
     }
 } CO2_END
+inline Errc selectDnsError(Errc ipv6, Errc ipv4) noexcept {
+    // Do not hide a retryable outage behind the other family's permanent miss.
+    auto transient = static_cast<Errc>(UV_EAI_AGAIN);
+    if (ipv6 == transient || ipv4 == transient) return transient;
+    auto permanent = [](Errc e) noexcept { return e == static_cast<Errc>(UV_EAI_NONAME) || e == static_cast<Errc>(UV_EAI_NODATA) || e == static_cast<Errc>(UV_EAI_ADDRFAMILY); };
+    return permanent(ipv6) && !permanent(ipv4) ? ipv4 : ipv6;
+}
 inline auto connectController(ConnectRaceState& s)
  CO2_BEG(co2::Task<>,(s),Result<void> wake;ConnectRaceState::Time now;std::chrono::milliseconds delay;
     int family=-1;ConnectSlot* idle=nullptr;) {
@@ -140,7 +147,7 @@ inline auto connectController(ConnectRaceState& s)
             continue;
         }
         if(s.dnsDone[0] && s.dnsDone[1] && !s.available(0) && !s.available(1) && s.active==0){
-            s.finish(s.errors.empty()?s.dnsError[0]:s.errors.back());break;
+            s.finish(s.errors.empty()?selectDnsError(s.dnsError[0],s.dnsError[1]):s.errors.back());break;
         }
         delay=std::chrono::duration_cast<std::chrono::milliseconds>(s.options.overallTimeout-std::chrono::duration_cast<std::chrono::milliseconds>(now-s.started));
         if(family>=0 && idle && !s.used.empty())delay=(std::min)(delay,std::chrono::duration_cast<std::chrono::milliseconds>(

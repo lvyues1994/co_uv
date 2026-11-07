@@ -112,4 +112,16 @@ TEST_CASE("Loop-first teardown cannot return an orphaned HE winner while drainin
  auto result=uvco::detail::co2compat::TaskAccess::takeResult(task);
  CHECK(!result);CHECK(result.error()==uvco::Errc::aborted);
 }
+
+namespace {
+auto dnsError(addrinfo hints,bool reverse) CO2_BEG(co2::Task<uvco::Result<std::vector<uvco::SocketAddress>>>,(hints,reverse)) {
+ CO2_RETURN(static_cast<uvco::Errc>((hints.ai_family==AF_INET6)!=reverse?UV_EAI_NONAME:UV_EAI_AGAIN));
+} CO2_END
+}
+TEST_CASE("HE retains a retryable family DNS error over the other family NONAME") {
+ for(bool reverse:{false,true}) {
+ uvco::Loop loop;uvco::DnsResolver resolver{loop,{},[=](uvco::Loop&,std::string,std::string,addrinfo h){return dnsError(h,reverse);}};
+ auto r=uvco::run(loop,uvco::connect(loop,resolver,"fixture.test",80));CHECK(!r);CHECK(r.error()==static_cast<uvco::Errc>(UV_EAI_AGAIN));
+ }
+}
 UVCO_TEST_MAIN
