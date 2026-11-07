@@ -487,6 +487,37 @@ TEST_CASE("fs regression: stop already requested before completion releases with
  if(r){r->file.reset();::unlink(r->path.c_str());}
  CHECK(canceled);CHECK(not exists(callbackPath));CHECK(openFdCount()==base);
 }
+namespace {
+std::string failedTempPath;
+struct ThrowTempProject : fs::detail::MkstempSpec {
+ explicit ThrowTempProject(std::string p){tpl=std::move(p);}
+ static fs::TempFile project(uv_fs_t& r,uvco::Loop&){failedTempPath=r.path;throw std::bad_alloc{};}
+};
+using ThrowTempOp=fs::FsOp<ThrowTempProject>;
+auto tempProjectFail(ThrowTempOp& op)
+ CO2_BEG(co2::Task<Result<fs::TempFile>>, (op),Result<fs::TempFile> r;) {
+ CO2_AWAIT_SET(r,op);CO2_RETURN(std::move(r));
+} CO2_END
+struct OtherProject : ThrowProject {
+ explicit OtherProject(std::string p){path=std::move(p);}
+ static std::string project(uv_fs_t&,uvco::Loop&){throw 42;}
+};
+using OtherOp=fs::FsOp<OtherProject>;
+auto otherProjectFail(OtherOp& op)
+ CO2_BEG(co2::Task<Result<std::string>>, (op),Result<std::string> r;) {
+ CO2_AWAIT_SET(r,op);CO2_RETURN(r);
+} CO2_END
+}
+TEST_CASE("fs: throwing resource projection releases fd and temp path") {
+ uvco::Loop loop;auto count=openFdCount();ThrowTempOp op{loop,path("throw-XXXXXX")};
+ auto r=uvco::run(loop,tempProjectFail(op));CHECK(not r && r.error()==Errc::no_memory);
+ CHECK(not exists(failedTempPath));CHECK(openFdCount()==count);
+}
+TEST_CASE("fs: non-allocation callback exception rethrows at await_resume") {
+ uvco::Loop loop;OtherOp op{loop,std::string{UVCO_TEST_TMP_DIR}};
+ bool caught=false;try {static_cast<void>(uvco::run(loop,otherProjectFail(op)));}catch(int n){caught=n==42;}
+ CHECK(caught);
+}
 int main() {
     int const rc = ::uvco_test::runAll();
     static_cast<void>(::rmdir(scratch().c_str()));
