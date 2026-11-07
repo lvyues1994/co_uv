@@ -85,4 +85,31 @@ TEST_CASE("winning TCP does not wait for an independently owned uncancelable DNS
  auto connected=uvco::run(loop,uvco::connect(loop,resolver,"fixture.test",port));CHECK(connected);CHECK(!finished);
  gate.set();static_cast<void>(connected->close());static_cast<void>(server.close());loop.runUntilIdle();CHECK(finished);
 }
+
+namespace {
+auto slowCleanup(uvco::Loop& loop,int& cleaned) CO2_BEG(co2::Task<>,(loop,cleaned),uvco::Result<void> r;) {
+ CO2_AWAIT_SET(r,uvco::sleep(loop,std::chrono::seconds{30}));++cleaned;
+} CO2_END
+auto ignoresCancel(uvco::Loop& loop,int& cleaned) CO2_BEG(co2::Task<uvco::Result<uvco::Tcp>>,(loop,cleaned)) {
+ CO2_AWAIT((uvco::detail::ConnectGroupAwaiter{slowCleanup(loop,cleaned),{}}));
+ CO2_RETURN(uvco::Errc::aborted);
+} CO2_END
+auto immediateTcp(uvco::Loop& loop,bool& won) CO2_BEG(co2::Task<uvco::Result<uvco::Tcp>>,(loop,won),uvco::Tcp tcp{loop};) {
+ won=true;CO2_RETURN(std::move(tcp));
+} CO2_END
+}
+TEST_CASE("Loop-first teardown cannot return an orphaned HE winner while draining a loser") {
+ auto loop=std::unique_ptr<uvco::Loop>{new uvco::Loop};int cleaned=0;bool won=false;
+ uvco::DnsResolver resolver{*loop,{},[](uvco::Loop&,std::string,std::string,addrinfo h){return addresses(h,1);}};
+ uvco::ConnectOptions options;options.minimumDelay=options.attemptDelay=std::chrono::milliseconds{10};
+ options.connector=[&](uvco::Loop& l,uvco::SocketAddress a){return a.isIpv6()?ignoresCancel(l,cleaned):immediateTcp(l,won);};
+ auto task=uvco::connect(*loop,resolver,"fixture.test",1,options);uvco::detail::RunCompletion completion{*loop};
+ uvco::detail::co2compat::TaskAccess::start(task,completion.handle(),{});
+ auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds{5};
+ while(!won && std::chrono::steady_clock::now()<deadline)static_cast<void>(uv_run(loop->raw(),UV_RUN_NOWAIT));
+ bool hadWinner=won,pending=!completion.finished;
+ loop.reset();CHECK(hadWinner);CHECK(pending);CHECK(completion.finished);CHECK(cleaned==1);
+ auto result=uvco::detail::co2compat::TaskAccess::takeResult(task);
+ CHECK(!result);CHECK(result.error()==uvco::Errc::aborted);
+}
 UVCO_TEST_MAIN

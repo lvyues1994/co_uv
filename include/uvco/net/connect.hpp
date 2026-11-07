@@ -190,6 +190,11 @@ inline auto connect(Loop& loop,DnsResolver& resolver,std::string host,std::uint1
     CO2_AWAIT((detail::ConnectGroupAwaiter{detail::connectGroup(state,std::move(host),port),state.stop.get_token()}));
     state.parentCancel.disarm();
     if(state.exception){CO2_AWAIT(state.winner.close());std::rethrow_exception(state.exception);}
+    // A winner can be committed before loser drain finishes. Loop fallback may
+    // close it in that interval; never return a successful orphaned stream.
+    if(state.winner && uv_is_closing(reinterpret_cast<uv_handle_t*>(state.winner.raw()))){
+        CO2_AWAIT(state.winner.close());CO2_RETURN(Errc::aborted);
+    }
     if(state.winner)CO2_RETURN(std::move(state.winner));
     CO2_RETURN(state.error);
 } CO2_END
