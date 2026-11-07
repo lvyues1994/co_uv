@@ -8,6 +8,7 @@
 #include <utility>
 #include "uvco/detail/libuv.hpp"
 #include "uvco/fs/detail/watch.hpp"
+#include "uvco/detail/watcher/native.hpp"
 
 namespace uvco {
 namespace fs {
@@ -18,20 +19,28 @@ struct FsPollChange {
 };
 
 namespace detail {
-class FsPollBlock final : public WatchBlock<FsPollChange> {
+struct FsPollBackend {
+    using Handle = uv_fs_poll_t;
+    static int init(uv_loop_t* l, Handle* h) noexcept { return uv_fs_poll_init(l, h); }
+    static int start(Handle* h, uv_fs_poll_cb cb, char const* path, unsigned int interval) noexcept {
+        return uv_fs_poll_start(h, cb, path, interval);
+    }
+    static int stop(Handle* h) noexcept { return uv_fs_poll_stop(h); }
+};
+class FsPollBlock final : public ::uvco::detail::watcher::NativeWatcherBlock<FsPollBackend, WatchBlock<FsPollChange>> {
+    using Base = ::uvco::detail::watcher::NativeWatcherBlock<FsPollBackend, WatchBlock<FsPollChange>>;
   public:
     FsPollBlock(Loop& loop, int& status, std::string path, unsigned int interval) noexcept
-        : WatchBlock{loop}, path_{std::move(path)}, interval_{interval} {
-        status = uv_fs_poll_init(loop.raw(), &poll_);
-        if (status == 0) bindHandle();
+        : Base{loop}, path_{std::move(path)}, interval_{interval} {
+        status = init();
     }
     ~FsPollBlock() override = default;
     Result<void> start() noexcept {
-        return fromStatus(uv_fs_poll_start(&poll_, &FsPollBlock::onPoll, path_.c_str(), interval_));
+        return fromStatus(startNative(&FsPollBlock::onPoll, path_.c_str(), interval_));
     }
     Result<void> stop() noexcept {
         if (closing()) return Errc::aborted;
-        auto result = fromStatus(uv_fs_poll_stop(&poll_));
+        auto result = fromStatus(stopNative());
         if (result) abortPending();
         return result;
     }
@@ -40,7 +49,6 @@ class FsPollBlock final : public WatchBlock<FsPollChange> {
         return std::chrono::milliseconds{static_cast<std::chrono::milliseconds::rep>(interval_)};
     }
   private:
-    uv_handle_t* uvHandle() noexcept override { return reinterpret_cast<uv_handle_t*>(&poll_); }
     static void onPoll(uv_fs_poll_t* handle, int status,
                        uv_stat_t const* prev, uv_stat_t const* curr) noexcept {
         auto& self = fromData<FsPollBlock>(handle->data);
@@ -52,7 +60,6 @@ class FsPollBlock final : public WatchBlock<FsPollChange> {
         UVCO_CONTRACT_CHECK(prev != nullptr && curr != nullptr);
         self.publish(FsPollChange{*prev, *curr}); // copy before callback storage expires
     }
-    uv_fs_poll_t poll_{};
     std::string path_; // owned for setInterval/restart; never borrow caller strings
     unsigned int interval_;
 };
