@@ -11,7 +11,7 @@ auto timed(uvco::Loop& loop,uvco::CaptureCancel action)
 }
 TEST_CASE("communicate concurrently drains both outputs while writing stdin"){
  uvco::Loop loop;uvco::CaptureOptions io;io.input=std::string(131072,'i');io.stdoutLimit=400000;io.stderrLimit=200000;
- auto r=uvco::run(loop,uvco::communicate(loop,command("duplex"),std::move(io)));CHECK(r);CHECK(r->status.exit_status==0);
+ auto r=uvco::run(loop,uvco::communicate(loop,command("duplex"),std::move(io)));CHECK(r);CHECK(r->status.exitStatus==0);
  CHECK(r->stdoutData==std::string(131072,'o')+std::string(131072,'i'));CHECK(r->stderrData==std::string(131072,'e'));
 }
 TEST_CASE("capture rejects oversized output"){

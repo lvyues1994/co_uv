@@ -22,7 +22,7 @@ TEST_CASE("process exit codes") {
  for(int code : {0, 1, 42}) {
   uvco::ProcessOptions o; o.file=UVCO_TEST_PROCESS_HELPER; o.args={"exit", std::to_string(code)};
   auto p=uvco::spawn(loop,o); CHECK(p);
-  auto r=uvco::run(loop,waitFor(*p)); CHECK(r && r->exit_status==code && r->term_signal==0);
+  auto r=uvco::run(loop,waitFor(*p)); CHECK(r && r->exitStatus==code && r->termSignal==0);
  }
 }
 namespace {
@@ -36,7 +36,7 @@ auto exchange(uvco::Process& p, uvco::Pipe& in, uvco::Pipe& out)
   if (not n) { CHECK(n.error()==uvco::Errc::eof); break; }
   text.append(buf,*n);
  }
- CO2_AWAIT_SET(status,p.wait()); CHECK(status && status->exit_status==0);
+ CO2_AWAIT_SET(status,p.wait()); CHECK(status && status->exitStatus==0);
  CO2_RETURN(text);
 } CO2_END
 
@@ -48,7 +48,7 @@ auto output(uvco::Process& p, uvco::Pipe& out)
   if (not n) { CHECK(n.error()==uvco::Errc::eof); break; }
   text.append(buf,*n);
  }
- CO2_AWAIT_SET(status,p.wait()); CHECK(status && status->exit_status==0);
+ CO2_AWAIT_SET(status,p.wait()); CHECK(status && status->exitStatus==0);
  CO2_RETURN(text);
 } CO2_END
 
@@ -79,8 +79,8 @@ TEST_CASE("process kill and cached exit; repeat wait") {
  uvco::Loop loop; auto p=uvco::spawn(loop,sleeper()); CHECK(p && p->pid()>0);
  CHECK(p->kill(SIGTERM));
  uvco::drain(loop); // exit callback arrives before wait
- auto r=uvco::run(loop,waitFor(*p)); CHECK(r && r->term_signal==SIGTERM);
- auto again=uvco::run(loop,waitFor(*p)); CHECK(again && again->term_signal==SIGTERM);
+ auto r=uvco::run(loop,waitFor(*p)); CHECK(r && r->termSignal==SIGTERM);
+ auto again=uvco::run(loop,waitFor(*p)); CHECK(again && again->termSignal==SIGTERM);
  CHECK(not p->kill(SIGTERM));
 }
 TEST_CASE("process cross-thread cancel wait does not kill; can wait again") {
@@ -90,7 +90,7 @@ TEST_CASE("process cross-thread cancel wait does not kill; can wait again") {
  auto r=uvco::run(loop,waitFor(*p),stop.get_token()); t.join();
  CHECK(not r && r.error()==uvco::Errc::canceled);
  CHECK(p->kill(0)); CHECK(p->kill(SIGKILL));
- r=uvco::run(loop,waitFor(*p)); CHECK(r && r->term_signal==SIGKILL);
+ r=uvco::run(loop,waitFor(*p)); CHECK(r && r->termSignal==SIGKILL);
 }
 TEST_CASE("process pre-stopped wait") {
  uvco::Loop loop; auto p=uvco::spawn(loop,sleeper()); CHECK(p);
@@ -151,7 +151,7 @@ TEST_CASE("process true false and successful spawn fd cleanup") {
   for(int i=0;i<20;++i) {
    uvco::ProcessOptions o; o.file=UVCO_TEST_PROCESS_HELPER;o.args={"exit",std::to_string(i%2)};
    auto p=uvco::spawn(loop,o); CHECK(p);
-   auto r=uvco::run(loop,waitFor(*p)); CHECK(r && r->exit_status==i%2);
+   auto r=uvco::run(loop,waitFor(*p)); CHECK(r && r->exitStatus==i%2);
   }
  }
  CHECK(fds()==base);
@@ -165,7 +165,7 @@ TEST_CASE("process inherit fd and detached option") {
  uvco::Loop loop; uvco::ProcessOptions o; o.file=UVCO_TEST_PROCESS_HELPER;o.args={"exit","0"}; o.detached=true;
  o.stdio={uvco::ProcessStdio::inherit(0),uvco::ProcessStdio::inherit(1),uvco::ProcessStdio::inherit(2)};
  auto p=uvco::spawn(loop,o); CHECK(p); auto r=uvco::run(loop,waitFor(*p));
- CHECK(r && r->exit_status==0);
+ CHECK(r && r->exitStatus==0);
  co2::stop_source stop; stop.request_stop();
  r=uvco::run(loop,waitFor(*p),stop.get_token()); CHECK(not r && r.error()==uvco::Errc::canceled);
 }

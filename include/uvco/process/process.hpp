@@ -25,8 +25,8 @@
 namespace uvco {
 
 struct ExitStatus {
-    std::int64_t exit_status = 0;
-    int term_signal = 0;
+    std::int64_t exitStatus = 0;
+    int termSignal = 0;
 };
 
 // Pipe direction is from the child's perspective. The caller owns the parent Pipe,

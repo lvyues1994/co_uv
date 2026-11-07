@@ -87,7 +87,7 @@ TEST_CASE("SIGCHLD observer never steals Process reaping") {
     uvco::Loop loop; auto signal=uvco::Signal::create(loop); CHECK(signal); CHECK(signal->start(SIGCHLD));
     uvco::ProcessOptions options; options.file=UVCO_TEST_PROCESS_HELPER; options.args={"exit","17"};
     auto child=uvco::spawn(loop,options); CHECK(child);
-    auto status=uvco::run(loop,childExit(loop,*child)); CHECK(status); CHECK(status->exit_status==17);
+    auto status=uvco::run(loop,childExit(loop,*child)); CHECK(status); CHECK(status->exitStatus==17);
     drive(loop,[&]{return signal->queued()!=0;}); CHECK(signal->stop());
 }
 TEST_CASE("signal cancel only cancels waiter and restart aborts the old generation later") {

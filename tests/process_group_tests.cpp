@@ -11,7 +11,7 @@ auto group(uvco::Process& p,uvco::Pipe& output)
  CO2_BEG(co2::Task<>,(p,output),uvco::Result<std::size_t> n;uvco::Result<uvco::ExitStatus> exit;char bytes[64];std::string text;) {
  while(text.find("ready\n")==std::string::npos){CO2_AWAIT_SET(n,output.read(uvco::buffer(bytes)));CHECK(n);text.append(bytes,*n);}
  CHECK(p.signalGroup(SIGTERM));
- CO2_AWAIT_SET(exit,p.wait());CHECK(exit && exit->exit_status==0);
+ CO2_AWAIT_SET(exit,p.wait());CHECK(exit && exit->exitStatus==0);
  while(true){CO2_AWAIT_SET(n,output.read(uvco::buffer(bytes)));if(!n)break;text.append(bytes,*n);}
  CHECK(text.find("reaped\n")!=std::string::npos);CHECK(p.signalGroup(0).error()==static_cast<uvco::Errc>(UV_ESRCH));
 } CO2_END

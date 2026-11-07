@@ -12,7 +12,7 @@ auto text(uvco::Process& p,uvco::Pipe& out)
  uvco::Result<std::size_t> n;uvco::Result<uvco::ExitStatus> status;) {
  for(;;){CO2_AWAIT_SET(n,out.read(uvco::buffer(buf)));if(not n)break;s.append(buf,*n);}
  CHECK(n.error()==uvco::Errc::eof);
- CO2_AWAIT_SET(status,p.wait());CHECK(status && status->exit_status==0);CO2_RETURN(s);
+ CO2_AWAIT_SET(status,p.wait());CHECK(status && status->exitStatus==0);CO2_RETURN(s);
 } CO2_END
 }
 TEST_CASE("portable process helper exit codes") {
@@ -20,7 +20,7 @@ TEST_CASE("portable process helper exit codes") {
  for(int code:{0,1,42}){
   uvco::ProcessOptions o;o.file=UVCO_TEST_PROCESS_HELPER;o.args={"exit",std::to_string(code)};
   auto p=uvco::spawn(loop,o);CHECK(p);auto r=uvco::run(loop,result(*p));
-  CHECK(r && r->exit_status==code && r->term_signal==0);
+  CHECK(r && r->exitStatus==code && r->termSignal==0);
  }
 }
 TEST_CASE("portable process helper stdout") {
