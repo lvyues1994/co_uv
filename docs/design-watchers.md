@@ -1,6 +1,8 @@
-# Watcher 统一架构与 Block 2 模块设计（待批准）
+# Watcher 统一架构与 Block 2 模块设计（已批准）
 
-状态：**设计草案，不是实现承诺**。本轮仅保存本文；无代码修改、提交或 push。
+状态：**用户已批准，分阶段实现中**。五项默认已确认：hook 默认 unref、拒绝 SIGPIPE、
+DNS cache 默认关闭、HE 核心子集、kill-tree 先 POSIX group 后 Windows Job。
+当前已实现统一内核、FsEvent/FsPoll/Timer 无行为变更迁移及 Signal；下文 API 仍需结合各阶段实际交付状态阅读。
 基线：`main@48d201f`；工作目录 `/home/lvyues/code/uvcoro/co_uv`。
 核对：2026-11-07（北京时间）。所有 API 片段均为拟议接口。
 
@@ -262,7 +264,7 @@ CO2_AWAIT_SET(tcp, uvco::connect(loop, resolver, "example.com", 443, connectOpti
 phase 测试以受控 I/O 驱动，只检查 idle→prepare→poll→check 的可保证关系，不断言同类 watcher 次序或 timer 跨版本位置；
 无毫秒下界断言。策略用 POD/投影故障注入测容量、饱和、错误顺序、预取消和 deferred reservation；旧 fs 红例全部保留。
 
-**请用户批准以下边界（推荐值已给出，不代表已获批准）：**
+**已获批准的边界（保留原提问作决策记录）：**
 1. 接受内部统一、公共 facade 稳定；是否首版就要公开用户可定制的策略模板？推荐暂不公开。
 2. 接受 phase hook 优先 + 显式高级 next 适配、hook 默认 unref、awaitable 默认 ref？Idle 不暗中启动，不替代 yieldNextTurn。
 3. Signal 首版拒绝 SIGPIPE/同步故障信号；CHLD 只观察不回收；新 Signal restart 清空/abort 旧等待，是否接受？

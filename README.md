@@ -272,3 +272,22 @@ Release 检查发现 fs 测试的替代 new/delete 被 GCC 优化误报，单独
 未放宽 -Werror 或关闭 sanitizer。日志为 build/ci-local-*-{config,build,test}.log；红例 build/ci-gcc-release-red.log。
 GitHub runner、macOS、Windows 及全新 Git 下载尚未运行；以上不是远程 CI 已绿的声明。
 QNX 有 libuv 上游移植，但不代表 uvco 已验证支持，详见 [QNX 核对记录](docs/qnx.md)。
+
+## 统一 watcher 与 Signal
+
+内部采用 typed native Backend + EventPort/HookSink + 编译期 delivery policy；
+FsEvent/FsPoll 的 FIFO32 与 Timer 的累计/取消/关闭行为保持不变。
+`Timer::next()` 是 `tick()` 的精确别名，`FsEvent::start()` 是成员 `watch()` 的别名。
+
+```cpp
+auto signal = uvco::Signal::create(loop); // Result<Signal>；初始停止
+if (!signal || !signal->start(SIGINT)) { /* 处理 Result 错误 */ }
+CO2_AWAIT_SET(event, signal->next());     // Result<SignalEvent>{signum,count,saturated}
+```
+
+Signal 计数是 libuv 回调数（不是内核发送数），按 watcher 独立归约、饱和。
+成功 start/restart 新建代次、延后中止旧 next；失败保留旧监听；取消 next 不停止监听。
+禁止 SIGPIPE、不可捕获/同步故障信号；SIGCHLD 只通知，不抢 Process 的 reaper。
+信号 disposition 是进程级资源，不承诺与外部 sigaction 无损共存。
+Windows 只接受可实际接收的 INT/BREAK/HUP/WINCH（受控制台限制；本地未验证）。
+详见 [统一 watcher 设计](docs/design-watchers.md)。

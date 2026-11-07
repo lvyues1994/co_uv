@@ -531,6 +531,17 @@ openDir 的投影异常/迟到取消同步 closedir；readDir 只消耗游标，
   init 失败直接释放未初始化控制块，绝不调用 uv_close；回调投影的 bad_alloc→ENOMEM，其他异常按条目保存，
   take 完成清理后重抛。原生回调内联恢复后不再访问控制块。
 
+### 统一 watcher 内核与 Signal（Block 2）
+
+- `detail/watcher/delivery.hpp` 是纯缓存策略；`event_port.hpp` 只有一套 WaitSlot/CancelHook；
+  `native.hpp` 组合 typed Backend 与 Sink，不新增 public virtual Watcher/union/type switch。
+- FsEvent → FsPoll → Timer 分步迁移，原测试不改；fs 旧 detail 名称仅兼容别名。
+  `LegacyTimerRules` 显式保留预取消/缓存/active 优先级及 close 不清旧计数，计数回绕为零仍为空。
+- 新 Signal 采用单槽饱和归约、独立广播、事务性新代次；SIGPIPE/同步故障/不可捕获及 NPTL 保留信号被拒绝。
+  SIGCHLD 只通知；Process/libuv 仍唯一回收其子进程。多 Loop 须位于不同线程，遵守现有 Loop 亲和契约。
+- 原生通知仍内联；用户 stop/close/restart 延后恢复；预构造 next 持有旧代次 HandleRef。
+  ~Loop 原有 resident 关闭/孤儿策略不变。stream read/UDP recv 不并入通知缓存。
+
 ## 8. 待定问题
 
 - uvco core 依赖 co2 的若干 `detail` 接口：`TaskAccess`（启动 Task / 取结果）、`stopTokenOf`
@@ -840,3 +851,10 @@ CMake 3.14 的命令兼容性保留但未实机运行；Windows/macOS、多配�
   各 45/45 CTest 完整重复 3 次（每配置 135 次执行），含 install/consumer/两 TU；新增 5 组 watcher
   另各重复 20 次（每配置 100 次执行）。无 sanitizer 报告。日志 build/review/fs-watchers/{gcc,clang,asan,tsan}-*.log。
   此处不继承上轮 CI 接入时的 Release/FetchContent 实测声明；本轮未重跑那些额外配置，未运行远端 CI。
+
+### 统一 watcher 第一阶段验证
+
+新增 delivery 策略/异常记录/typed backend/lease 与 Timer 历史语义测试；未修改既有测试源文件。
+迁移完成后 g++、clang++、ASan+UBSan、TSan 各 50 个 CTest 目标全量重复三次通过，含安装/consumer/两 TU/header 检查。
+Signal 独立测试进程重复 20 次通过，覆盖同号双 watcher、跨线程双 Loop、SIGCHLD/Process、取消/close/restart 与饱和。
+后续模块仍以设计文档为待实现项，不能把通过本地 Linux 测试当成 Windows/macOS 已验证。

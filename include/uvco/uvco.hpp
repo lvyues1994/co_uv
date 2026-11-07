@@ -12,3 +12,5 @@
 #include "uvco/dns.hpp"
 
 #include "uvco/work.hpp"
+
+#include "uvco/watcher.hpp"
