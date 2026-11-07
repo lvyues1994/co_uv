@@ -212,7 +212,7 @@ class FsOp : public uvco::detail::ReqAwaiter<FsOp<Spec>, uv_fs_t, typename Spec:
     int start(uv_loop_t* const loop) {
         cancelRequested_ = false;
         int const status = spec_.submit(loop, &this->req_, &FsOp::onDone);
-        if (status < 0) uv_fs_req_cleanup(&this->req_);
+        if (status < 0) { completed(spec_, this->req_, 0); uv_fs_req_cleanup(&this->req_); }
         return status;
     }
 
@@ -229,6 +229,10 @@ class FsOp : public uvco::detail::ReqAwaiter<FsOp<Spec>, uv_fs_t, typename Spec:
 
     static void release(uv_fs_t& req, std::true_type) noexcept { Spec::release(req); }
     static void release(uv_fs_t&, std::false_type) noexcept {}
+
+    template<class S> static auto completed(S& spec, uv_fs_t& req, int) noexcept
+        -> decltype(spec.completed(req), void()) { spec.completed(req); }
+    template<class S> static void completed(S&, uv_fs_t&, long) noexcept {}
 
     static void onDone(uv_fs_t* const req) {
         auto* const self = static_cast<FsOp*>(static_cast<Base*>(req->data));
@@ -251,6 +255,7 @@ class FsOp : public uvco::detail::ReqAwaiter<FsOp<Spec>, uv_fs_t, typename Spec:
             }
         }
         uv_fs_req_cleanup(req);
+        completed(self->spec_, *req, 0);
         Base::complete(req, status);
     }
 
