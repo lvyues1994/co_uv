@@ -14,7 +14,7 @@ function(uvco_configure_test target)
     endif()
 endfunction()
 
-set(uvco_test_names wait_slot_tests work_tests dns_tests when_all_results_tests when_any_exception_tests process_portable_tests result_tests loop_tests thread_tests timer_tests sync_tests udp_tests lifecycle_tests
+set(uvco_test_names capture_tests wait_slot_tests work_tests dns_tests when_all_results_tests when_any_exception_tests process_portable_tests result_tests loop_tests thread_tests timer_tests sync_tests udp_tests lifecycle_tests
     run_wrong_thread_contract_test orphan_handle_use_contract_test timer_pending_destroy_contract_test
     sync_event_destroy_contract_test sync_when_any_empty_contract_test
     stream_concurrent_read_contract_test udp_concurrent_recv_contract_test)
@@ -123,3 +123,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_test(NAME uvco-range-storage-tests COMMAND uvco-range-storage-tests)
     unset(_uvco_new_symbol)
 endif()
+
+add_dependencies(uvco-capture-tests uvco-process-helper)
+target_compile_definitions(uvco-capture-tests PRIVATE UVCO_TEST_PROCESS_HELPER="$<TARGET_FILE:uvco-process-helper>")
+set_tests_properties(uvco-capture-tests PROPERTIES TIMEOUT 30)

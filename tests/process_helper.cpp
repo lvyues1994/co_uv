@@ -13,6 +13,7 @@ int main(int argc,char** argv) {
   std::this_thread::sleep_for(std::chrono::duration<double>{seconds});return 0;
  }
  if(mode=="echo"){std::cout<<(argc>2 ? argv[2] : "")<<'\n';return 0;}
+ if(mode=="duplex"){std::cout<<std::string(131072,'o')<<std::flush;std::cerr<<std::string(131072,'e')<<std::flush;std::cout<<std::cin.rdbuf();return 0;}
  if(mode=="cat"){std::cout<<std::cin.rdbuf();return 0;}
  if(mode=="envcwd") {
   char cwd[4096];std::size_t n=sizeof cwd;
