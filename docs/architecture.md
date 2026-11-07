@@ -414,7 +414,7 @@ stop_source，worker 自行轮询退出。取消 hook noexcept，不调用额外
 工作 token 上的 callback 同样必须 noexcept。不强杀线程，after-work 前绝不交付/销毁 request。
 
 worker 中 callable、结果就地构造异常均捕获为 exception_ptr；libuv after-work 发布 worker
-写入后回 loop 完成。after-work 入口检查父 token 是取消线性化点；异常优先于取消，之后在
+写入后回 loop 完成。成功 dequeue 的 UV_ECANCELED 才表示 callable 未运行；callable 一旦完成，晚到取消不撤销结果。异常在
 await_resume 重抛。取消成功不回滚已有副作用；忽略 token 的运行中 callable 可以无限阻塞
 结构化完成。与 fs、DNS 共用 libuv 全局池，不引入独立 ThreadPool/KeepAlive。
 
@@ -511,7 +511,7 @@ openDir 的投影异常/迟到取消同步 closedir；readDir 只消耗游标，
   保留至 take，完成但尚未恢复也不可重新占用。payload 限 nothrow move；分配型投影不放入此槽。
   HandleRef、CancelHook、opBegin/opEnd 和底层 stop 留在模块内；槽不决定恢复策略。
 - **请求异常边界**：DNS guard 在恢复前释放 addrinfo；Work worker 捕获 exception_ptr，
-  after-work 后重抛。二者都在完成回调入口线性化取消，未发起时仍遵循 ReqAwaiter 的先看取消。
+  after-work 后重抛。DNS 保留回调入口取消规则；Work 保留 callable 的完成结果。未发起时仍遵循 ReqAwaiter 的先看取消。
 
 - **P2 存储优化**：whenAny range 用 unique_ptr<Entry[]> 固定存储，每项含 slot/end/exception/child；
   Task vector 独立。只减少 bookkeeping 分配，不改变 eager collection、loser 异常或 drain 语义。
@@ -934,3 +934,24 @@ ASan 开启 leak 检测，UBSan/TSan halt_on_error；无 sanitizer 报告。含�
 
 最终后半段 + 全量自查源码已验证：g++、clang++、ASan/UBSan、TSan 各 59 CTest targets ×3，
 再各 18 个定向 targets ×20，全部通过；包含安装/消费者/headers/两 TU。日志为 build/block2-cont/verified-*.log。
+
+
+### 独立 review 后的规则修订
+
+- pending write 的 token cancel 默认 close 整个 stream；等 native write callback 后 canceled，
+  不提前释放 buffer。pre-cancel 无副作用；已完成 write 不被晚到 stop 覆盖，显式 close 仍 aborted。
+- write Result<void> 不提供进度：try_write 发送前缀后 uv_write 提交/分配失败关闭流；
+  queued write callback error 也关闭流。用户不得把未知部分提交当作可重试的整包。
+- 双族解析全败：EAI_AGAIN 优先，避免永久 miss 掩盖暂时性故障；否则优先非 miss，稳定回退 IPv6。
+  已启动连接全败仍按最后发起候选的错误，不改 first-success/drain。
+- Work queued cancel 由 uv_cancel 成功跳过 callable；运行中 stop 只作协作通知。
+  函数完成即返回值/void，异常 after-work 后重抛，不再按父 token 丢弃真实结果。
+- 新增 Tcp/Udp/Timer/DnsResolver::create() Result factory。native 错误原样 Errc、内部 OOM 映射 no_memory；
+  legacy handle 构造器保留 native init fail-fast，DnsResolver throwing ctor 保留 native system_error 身份。
+  新资源边界推荐工厂，参数自己的 C++ 构造异常不被掩盖。
+- Loop 显式 scheduleCapacity（默认65536/queue），四个 vector 构造期 reserve，native init 前完成。
+  schedule 与 batch drain 零分配；超过配置上限是契约违规，不掉 continuation、不重入 resume。
+  这用有限/可调内存换取 noexcept 路径可证明不抛；未来 co2 有公开 intrusive scheduler node 后可再去掉此上限。
+- ExitStatus 字段在 0.1 前统一为 exitStatus/termSignal，无兼容别名。
+- 已加入 MIT/CHANGELOG 与 installed license 回归；格式提交仅四个指定 header + .clang-format，
+  非注释 C++ token stream 前后相同。验证历史从 README 移到 verification.md，不依赖临时目录。

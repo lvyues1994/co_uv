@@ -226,7 +226,7 @@ CO2_AWAIT_SET(tcp, uvco::connect(loop, resolver, "example.com", 443, connectOpti
 5. **不能直接 whenAny(connectA,connectB)**：本库 whenAny 首个业务错误会终止比赛，且 loser 错误可能覆盖成功；
    HE 需要“普通失败继续，首次成功赢”。用专用 ConnectRaceState，失败只记入候选表，异常才取消全部并在 drain 后重抛。
    普通 loser 错误不覆盖 winner；清理过程的异常仍须收集，必要时关闭候选 winner 后重抛。
-   全败按候选发起顺序选择最后候选错误（不是 callback 时序）；双族纯 DNS 失败按偏好族选错误，附可选 owned diagnostics。
+   全败按候选发起顺序选择最后候选错误（不是 callback 时序）；双族纯 DNS 失败优先保留 transient EAI_AGAIN，再非永久 miss，最后按偏好族选错误，附可选 owned diagnostics。
 6. v1 不自行实现 NAT64 prefix discovery/local synthesis、DNS push、完整跨平台 RFC6724 policy，避免假造地址；
    原生 DNS64 返回的 IPv6 地址正常使用。若要求完整 RFC8305，以上是显式后续工作，不是默默忽略规范。
 

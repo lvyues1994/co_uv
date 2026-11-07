@@ -6,8 +6,9 @@
 基于 [co2](https://github.com/lvyues1994/coro)（C++14 无栈协程库）对 libuv 的协程封装。
 设计见 [docs/architecture.md](docs/architecture.md)。
 
-当前进度：v0.1 第 1 步 **core**（`Result<T>`、`Loop`、`run()`、`detail::ReqAwaiter`）、第 2 步 **timer**（`sleep()`、`Timer`、通用句柄生命周期）、第 3 步 **sync**（`Event`、`Mutex`、`Channel<T>`、`whenAny`、`timeout`）、第 4 步 **stream**（`Tcp`、`Pipe`：拉模式 read、write、shutdown、listen/accept、connect）、第 5 步 **udp**（`Udp`：拉模式 recv 返回 `Datagram`、send、connect）、第 6 步 **fs**（`File`、`open`/`stat`/`unlink`/`mkdir`/`rename`/`mkstemp`/`scandir`/`copyfile`/`sendfile` 等、`readFile`/`writeFile`，迟到取消不泄漏 fd）。
-v0.1 范围（文档 §5）已全部实现；另已增加 **process**（`spawn`、可取消 `wait`、`kill`、stdio Pipe）；现已增加 **dns**（`getaddrinfo/getnameinfo`）、**work**（`queueWork`）与 Result-aware `whenAllResults`；另已增加 **fs watchers**（`FsEvent` / `FsPoll`）；**Signal / phase hooks / TTY** 已实现；通用 fd poll 留待后续。
+提供 Loop/Result、timer、sync/组合器、Tcp/Pipe/TTY、UDP、文件/目录与 fs watchers、
+Signal/phase hooks、Process/capture、DNS resolver/cache、Happy Eyeballs 核心子集及线程池 Work。
+库为 header-only，错误边界、取消与关闭规则见下文及架构文档。
 
 ## 要求
 
@@ -111,18 +112,16 @@ int main() {
 不再丢失回收责任。只有显式 detach() 移交回收责任。Loop 析构也等非 detach 子进程退出，可能无限阻塞；
 必要时先 kill 再 close。完整生命周期语义见设计文档 §4.9。
 
-Review 修复：关闭 fd 不可取消且 awaiter 自构造持有所有权；handle awaiter 跨 close 安全；
+生命周期约束：关闭 fd 不可取消且 awaiter 自构造持有所有权；handle awaiter 跨 close 安全；
 Loop 析构中 Sleep 返回 aborted；fs 回调异常安全并明确取消线性化点；co2 内部接口集中兼容层及能力探测。
 
 
-此前 review 修复验证（当时 21 个 CTest 项）：g++/clang++ 各重复 5 遍、ASan/UBSan 10 遍、TSan 20 遍通过。
 Linux 专用生命周期/泄漏测试按平台注册；子进程基本功能使用项目内编译的 helper，不依赖 /bin 命令。
 
 
 whenAny 异常安全：分支结果取出/移动/构造抛异常时，先取消其余分支并等待所有已启动分支结束，
 再在 await_resume 重抛；落败者的异常也不会丢失，嵌套 whenAny 与 timeout 遵循相同规则。
-此前 whenAny 修复新增 19 个异常回归用例；当时全套 22 个 CTest 项在 g++/clang++（各 5 遍）、ASan/UBSan（10 遍）、
-TSan（20 遍）通过。忽略取消且永不结束的分支仍会阻塞整个组合器。
+忽略取消且永不结束的分支仍会阻塞整个组合器。
 
 ## Result-aware all、DNS 与线程池工作
 
@@ -138,7 +137,7 @@ TSan（20 遍）通过。忽略取消且永不结束的分支仍会阻塞整个�
   native addrinfo 在恢复协程前释放；投影 bad_alloc 返回 ENOMEM，其他异常清理后重抛。
 - `<uvco/work.hpp>`：`queueWork(loop, fn)` 返回 `Result<R>`；fn 可接收一个 `co2::stop_token`
   用于协作轮询，也可无参。排队取消先 uv_cancel，成功则不运行 fn；运行中不强制中断，仍等 after-work。
-  取消完成线性化点同样是 after-work 入口；worker/结果构造异常保存 exception_ptr，清理后在 loop 重抛，
+  callable 一旦完成就返回实际结果（包括 void），晚到取消不丢弃结果；worker/结果构造异常保存 exception_ptr，清理后在 loop 重抛，
   优先于取消。内部取消 hook noexcept；若 fn 自己注册 token callback，也必须 noexcept。
   返回 canceled 不回滚已经发生的副作用。libuv 全局线程池由 DNS/fs/work 共享。
 
@@ -149,13 +148,7 @@ TSan（20 遍）通过。忽略取消且永不结束的分支仍会阻塞整个�
 这些操作的错误仍走 Result；用户 callable/值构造抛出的 C++ 异常在请求完成后重抛。
 忽略协作取消且永不结束的 Work/组合子分支仍会阻塞 drain；Process 默认回收策略未改变。
 
-P1 最新验证：27 个 CTest 项（含公共头独立包含构建），g++/clang++ 各重复 5 遍，
-ASan/UBSan + leak detection 重复 10 遍，TSan 重复 20 遍通过。
-新增 allResults、DNS、Work、WaitSlot 用例覆盖错误/取消/异常/并发与资源释放；Linux DNS
-故障注入通过 linker wrap 保留 sanitizer 的 allocator interceptor，不关闭 sanitizer。
-P1 当时未覆盖 install/export（现已完成，见使用章节）；Windows/macOS、DNS 缓存/Happy Eyeballs、强制中断 worker 仍未覆盖。
-
-## P2：可选适配器与扩展
+## 可选适配器与扩展
 
 - `capture(loop, ProcessOptions, CaptureOptions)` / `communicate(...)`：同时写 stdin、读 stdout/stderr、
   等待退出，返回 `Result<CaptureResult>`（status/stdoutData/stderrData）。input 按值持有；
@@ -188,18 +181,6 @@ whenAny range 现在仅用一个固定 Entry 数组保存 slot/end/exception/chi
 仍收集每个分支，loser 的 throwing move 继续传播，**没有做只提取赢家的语义修改**。
 libuv 导入集中到内部 detail/libuv.hpp，加入 Windows guards 和 macro-resistant numeric_limits 写法；
 这不等于已经完成 Windows/macOS 运行验证。
-
-P2 验证（Linux）：38 个 CTest，g++ / clang++ 各重复 5 遍，ASan/UBSan + leak detection
-重复 10 遍，TSan 重复 20 遍，共 1520 次全部通过；全部公共头独立编译通过。
-新增覆盖双输出并发 + 大 stdin、独立 cap、pending write 取消、输出异常 drain/reap、
-BufferedReader 取消重试、fd adoption 成败/占用冲突、目录 lease/迟到取消/投影异常、
-yield 五种 phase/预取消/Loop teardown、UDP 选项与 listener。
-构建与测试日志位于 `build/p2-final-{gcc,clang,asan,tsan}-*.log`。
-
-install/export 最新验证（Linux）：40 个 CTest 在 g++、clang++、ASan/UBSan（含 leak detection）、
-TSan 四构建各重复 2 遍，共 320 次全部通过；安装/源码消费者也继承对应 sanitizer flags。
-额外通过 CMake 3.28 的安装与两 TU 消费者测试；主验证使用 CMake 4.4。
-日志见 `build/install-{gcc,clang,asan,tsan}-*.log`；CMake 3.14、Windows/macOS 和多配置生成器未实机验证。
 
 ## 文件变更监控
 
@@ -245,10 +226,6 @@ FsEvent 不承诺被监控目标自身 rename/delete 后自动跟随或重新订
 FsPoll 按路径持续 stat，缺失后可恢复；stop 不强制中断已提交的 stat，close/~Loop 可能等待底层 I/O。
 active watcher 会保持原生 loop 存活，调用 drain 前须 stop/close（run 仍只驱动到根任务完成）。
 
-fs watcher 首次交付时的历史 Linux 验证：g++、clang++、ASan/UBSan、TSan 四配置各 **45/45 CTest，完整重复 3 轮**；
-新增 5 组 watcher 测试另各重复 20 轮，含 install/consumer/两 TU 检查。日志在 `build/review/fs-watchers/`。
-macOS/Windows CI 仍为非阻塞，QNX 尚无目标机验证；CI 不需改动，CMake 自动纳入新增测试。
-
 ## GitHub CI
 
 `.github/workflows/ci.yml` 在 push / pull_request / 手动触发时运行，不自动发布或推送。
@@ -264,13 +241,6 @@ macOS/Windows CI 仍为非阻塞，QNX 尚无目标机验证；CI 不需改动�
 - TSan 仅在一次性 GitHub runner 将 vm.mmap_rnd_bits 调整到 28，以兼容 shadow mapping；
   不关闭 sanitizer、不靠重试或过滤掩盖报告。本地机器未修改此设置。
 
-本地验证方法：`build/ci-tools/actionlint .github/workflows/ci.yml`（工具不提交）。
-CI 接入时（watcher 加入前）的本地历史记录：GCC/Clang Debug/Release、ASan/UBSan、TSan 六配置各 40 个 CTest；
-另通过强制 FetchContent 发现路径的真实 libuv/co2 构建、独立安装及 39 个 CTest（使用本地 source override，
-libuv 源自校验过的官方 v1.48.0 归档，不测试 Git 下载）。actionlint 1.7.12 检查通过。
-Release 检查发现 fs 测试的替代 new/delete 被 GCC 优化误报，单独用 noinline 保持 hook 边界，
-未放宽 -Werror 或关闭 sanitizer。日志为 build/ci-local-*-{config,build,test}.log；红例 build/ci-gcc-release-red.log。
-GitHub runner、macOS、Windows 及全新 Git 下载尚未运行；以上不是远程 CI 已绿的声明。
 QNX 有 libuv 上游移植，但不代表 uvco 已验证支持，详见 [QNX 核对记录](docs/qnx.md)。
 
 ## 统一 watcher 与 Signal
@@ -329,8 +299,7 @@ Unix reopened native fd 与辅助 duplicate 分别跟踪；fallback dup 的文�
 重定向 stdio 返回 ENOTTY，请使用 Pipe/File；Windows 输入/输出 console 的能力与尺寸查询遵循 native 限制。
 Unix PTY 覆盖双向 I/O、模式、取消/close/Loop-first、失败所有权与 fd leak；Windows 实机尚未验证。
 
-Block 2 进度：watcher core / FsEvent→FsPoll→Timer / Signal / phase / TTY 已交付；
-DNS cache（默认关闭）、Happy Eyeballs 核心子集与 POSIX signalGroup 现已完成。Windows Job 与精确 ModeGuard 后续单独验证。
+Windows Job 与精确 ModeGuard 尚未实现。
 
 
 ### DNS resolver 与 Happy Eyeballs
@@ -379,8 +348,33 @@ auto sent = process.signalGroup(SIGTERM);   // Result<void>；0 只探测，负�
 leader 退出后不保留“稍后再 SIGKILL 同一 PGID”的权限。后代可 setsid/setpgid 逃逸；
 缺少 WNOWAIT 的平台及 Windows Job 未实现路径返回 ENOTSUP；Windows capture killGroup 沿用 ENOSYS。
 
-Block 2 自查范围、已修复问题和支持边界见 [docs/block2-review.md](docs/block2-review.md)。
 
-本轮最终 Linux 验证：g++ / clang++ / ASan+UBSan / TSan 各 **59 个 CTest ×3**，
-另各 **18 个 watcher/fs/DNS/HE/group 定向目标 ×20**，全部通过（含 install/consumer/header/两 TU）。
-日志 `build/block2-cont/verified-*.log`；CI 未变更，本地结果不等于远程平台已验证。
+
+
+## 构造与失败规则
+
+推荐对资源边界使用 `Tcp::create(loop)`、`Udp::create(loop)`、`Timer::create(loop)`、
+`DnsResolver::create(loop, options)`：返回 `Result<T>`，保留 native Errc，内部 bad_alloc 映射 no_memory。
+现有 FsEvent/FsPoll/Signal/phase/TTY 的工厂保持同一风格。
+
+保留三种明确的构造方式，不默默改变旧调用的失败语义：
+1. `Tcp{loop}` / `Udp{loop}` / `Timer{loop}`（及旧 Pipe）是 legacy convenience：分配可能抛 bad_alloc，native 初始化失败为契约违规。
+2. `DnsResolver{loop,...}` 是 throwing convenience：分配抛 bad_alloc，native 错误抛带 uv_category 的 system_error；不再伪装成 OOM。
+3. `create/watch/open/spawn` 等 Result factory 用于需要处理资源失败的代码。参数值本身的 C++ 构造/复制仍可能抛异常。
+空 owner 仅表示未绑定，不代表初始化失败；不得对空 owner 发起 I/O。
+
+## 写入、工作与调度边界
+
+- pending write 收到 stop 时默认关闭整个流，native write 回调完成后返回 canceled；同流其他操作可能 aborted。
+  预取消不关闭流，已完成结果不被晚到取消覆盖，显式 close 与 token 取消仍区分 aborted/canceled。
+- write 不是事务：错误前可能已发送前缀。部分 try_write 后提交失败/分配失败，或 queued write 回调失败时关闭流。
+  Result<void> 不报告偏移，禁止向原流盲目重试整包；需要偏移的代码自行管理 tryWrite。
+- Work 只有成功 dequeue 的取消保证 callable 不运行；运行中 token 用于协作，函数完成就交付值/void，异常排空后重抛。
+- 双族 DNS 均失败时优先保留 EAI_AGAIN，永久 miss 不掩盖可重试故障；没有 transient 时优先非 miss，最后稳定按 IPv6。
+- `Loop{scheduleCapacity}` 默认每个队列 65536 项，构造时预分配 local/batch/remote/remoteBatch（64位约2MiB）。
+  noexcept schedule/drain 不分配、不丢 continuation、不内联重入；超过显式容量是契约违规，可在构造时提高容量。
+  `Loop` 构造期 bad_alloc 在 native 初始化前发生，不遗留 native 资源。
+
+## 项目信息
+
+[MIT License](LICENSE) · [Changelog](CHANGELOG.md) · [验证记录与平台范围](docs/verification.md) · [Review 修订](docs/review2.md)
