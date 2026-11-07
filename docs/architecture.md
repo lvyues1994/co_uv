@@ -422,7 +422,9 @@ Process 只可移动，HandleBlock 控制块持有 uv_process_t。
   `TaskAccess::arm/hasError/rethrowError/takeResult`（与 co2::whenAll 的实现方式相同）。
 - ~~`timeout` 只接受 `Task<Result<T>>`~~、~~whenAny 只支持同类型分支~~：已由 whenAny 重做解决
   （任意 awaitable、异构分支，见 §4.5）。另依赖 co2 `detail::AwaiterOf`、`ResultStorage`。
-- whenAny 在分支续体中移动分支结果：结果类型的移动构造抛异常 → `std::terminate`（续体无处报告）。
+- 已解决：whenAny 分支续体收集结果时的 throwing move/construct 不再 terminate。
+  tuple/vector 每分支保存 exception_ptr，续体仍 noexcept；将异常按 BranchEnd::exception 记入比赛，
+  取消落败者并等待全部已启动分支结束后，从 await_resume 重抛。
 - whenAny 与 `co2::whenAll` 各自实现；kotatsu 用一个 `when_op` 同时实现 all / any，可在 co2 侧统一。
 - sync 原语不支持跨线程使用；跨线程通信目前只能经 `scheduleOn(loop)` 回到 loop 线程再操作。
 - timeout 功能测试已去掉毫秒级耗时断言；独立 timer 精度测试仍保留容差，不代表硬实时保证。
@@ -566,7 +568,8 @@ Process 只可移动，HandleBlock 控制块持有 uv_process_t。
   helper 作为子进程夹具关闭 sanitizer 插桩，库与父测试仍全量插桩，避免重复加载运行时和信号终止夹具的干扰。
 - co2 内部依赖集中 compat，并在配置时能力探测；构造不兼容的本地 co2 fixture 已验证配置拒绝。
 - timeout 计时断言改为结果/取消/清理语义断言，运行时间由 CTest timeout 限制。
-- 尚未解决：whenAny 的 throwing move、all/any 上游统一、install/export；Windows/macOS 仅代码分层，未实机验证。
+- whenAny throwing move 已在后续修复（见下）；尚未解决 all/any 上游统一、install/export；
+  Windows/macOS 仅代码分层，未实机验证。
 
 
 验证记录：21 个 CTest 项全部通过：g++/clang++ 各重复 5 遍，ASan/UBSan 并行重复 10 遍，
@@ -574,3 +577,29 @@ TSan（halt_on_error=1）并行重复 20 遍，单项 timeout=120 秒。包括 i
 三个 build/review 复现分别转为 fs close、延迟 process wait、Sleep teardown 正式回归测试，修复前均观察到失败。
 另验证 find_package 的本地安装 co2 能力探测通过，不兼容 fixture 在配置阶段被拒绝。
 日志保留在 build/review/verified-*-tests.log；没有 Windows/macOS 执行结果。
+
+
+### whenAny throwing-move 异常安全修复（2026-11-07）
+
+- 根因：collectOne / range branchDone 虽为 noexcept，但从 Task promise 取值、移入组合器结果槽
+  都可能抛异常。只删除 noexcept 会让续体越过剩余分支计数更新，仍可能提前销毁挂起 Task。
+- collect 统一在 noexcept 边界捕获所有异常（包括非 std::exception），每分支保存 exception_ptr；
+  分支体异常也经过相同路径。原有 RaceState::branchDone 总会执行：记录第一个异常、请求取消、
+  递减 remaining。其原子发布/获取链保证 await_resume 读到各分支结果/异常槽。
+- 异常优先级保持不变：第一个被记录的异常 > 非取消错误 > 胜者/取消结果。落败者在取消过程中
+  发生的结果转移异常也优先于先前成功或 timeout 结果；所有已启动分支完成后才重抛。
+- 当胜者从结果槽构造成 WhenAnyResult/WhenAnyRangeResult、再传给调用者时抛异常，已经位于
+  await_resume（所有分支已结束），正常向外传播。保留并验证 WhenAnyResult 失败移动后
+  源仍有效、目标为空的基本异常保证；不强求恢复用户类型被部分移动的内容。
+- 额外异常存储：tuple 为每分支内联 exception_ptr；vector 在启动前分配同长度异常槽。
+  这不是零分配优化；构造 awaiter 时的分配失败发生在启动任何分支之前，按普通异常传播。
+- 新增 tests/when_any_exception_tests.cpp，19 用例：tuple/vector 胜者与落败者、Task 取值和
+  结果槽构造、Result<T> 包装、嵌套 whenAny、timeout 两个方向、最后交付值构造、分支体/返回值
+  构造异常、多异常优先级、非标准异常、两线程并发异常及活对象计数。
+- 修复前分别执行 7 个主要回归均 terminate；另外 4 个槽构造/包装/并发回归用旧头文件编译也
+  terminate。此前已正确处理的分支体/返回值构造和最后交付异常作为保护测试保留。
+- 验证：全部 22 个 CTest 项，g++/clang++ 各重复 5 遍，ASan/UBSan 并行重复 10 遍，TSan
+  halt_on_error=1 并行重复 20 遍，全通过；所有单项 timeout=120 秒。
+  日志在 build/review/whenany-*-tests.log，红测日志 whenany-red-* / whenany-extra-red-*。
+- 限制：析构函数须不抛异常；任一已启动分支不响应取消且永不结束时，whenAny/timeout 仍等待它，
+  这是结构化并发语义，不通过强行销毁协程解决。all/any 上游统一与跨平台实机验证仍待后续。

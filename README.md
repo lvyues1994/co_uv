@@ -66,3 +66,9 @@ Loop 析构中 Sleep 返回 aborted；fs 回调异常安全并明确取消线性
 
 本轮回归：21 个 CTest 项，g++/clang++ 各重复 5 遍、ASan/UBSan 10 遍、TSan 20 遍通过。
 Linux 专用生命周期/泄漏测试按平台注册；子进程基本功能使用项目内编译的 helper，不依赖 /bin 命令。
+
+
+whenAny 异常安全：分支结果取出/移动/构造抛异常时，先取消其余分支并等待所有已启动分支结束，
+再在 await_resume 重抛；落败者的异常也不会丢失，嵌套 whenAny 与 timeout 遵循相同规则。
+新增 19 个异常回归用例；全套 22 个 CTest 项在 g++/clang++（各 5 遍）、ASan/UBSan（10 遍）、
+TSan（20 遍）通过。忽略取消且永不结束的分支仍会阻塞整个组合器。
