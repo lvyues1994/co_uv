@@ -1,5 +1,9 @@
 # uvco
 
+[![CI（OWNER/REPO 占位）](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
+
+> 仓库尚未发布；发布到 GitHub 后将 badge 的 `OWNER/REPO` 替换为实际路径。
+
 基于 [co2](https://github.com/lvyues1994/coro)（C++14 无栈协程库）对 libuv 的协程封装。
 设计见 [docs/architecture.md](docs/architecture.md)。
 
@@ -197,3 +201,27 @@ install/export 最新验证（Linux）：40 个 CTest 在 g++、clang++、ASan/U
 TSan 四构建各重复 2 遍，共 320 次全部通过；安装/源码消费者也继承对应 sanitizer flags。
 额外通过 CMake 3.28 的安装与两 TU 消费者测试；主验证使用 CMake 4.4。
 日志见 `build/install-{gcc,clang,asan,tsan}-*.log`；CMake 3.14、Windows/macOS 和多配置生成器未实机验证。
+
+## GitHub CI
+
+`.github/workflows/ci.yml` 在 push / pull_request / 手动触发时运行，不自动发布或推送。
+- 阻塞项：Ubuntu 24.04，GCC/Clang 各 Debug + Release、Clang ASan/UBSan、Clang TSan，
+  加一个强制 FetchContent co2/libuv 的 job。apt libuv 必须 >=1.40，否则构建校验 SHA256 的 v1.48.0。
+- 所有配置开启测试与 install/export，包括独立消费者、前缀搬迁和两 TU 链接运行。
+  Fetch job 在测试前把两个依赖单独安装到 build/deps，消费者不依赖生产包捆绑依赖。
+- macOS（brew libuv）和 Windows MSVC（FetchContent 静态 libuv）为 experimental，
+  **job-level continue-on-error，不作为已验证平台或合并门槛**；须在真实 runner 稳定后再升级为阻塞项。
+- Linux/macOS 使用 ccache；所有平台缓存固定版本依赖源码，不缓存 CMake build tree。
+  action 固定到核对过的 commit SHA，token 仅 contents:read，checkout 不保留凭据。
+  同 ref 的新运行取消旧运行；失败上传日志/CTest/CMake 配置诊断，保留 14 天。
+- TSan 仅在一次性 GitHub runner 将 vm.mmap_rnd_bits 调整到 28，以兼容 shadow mapping；
+  不关闭 sanitizer、不靠重试或过滤掩盖报告。本地机器未修改此设置。
+
+本地验证方法：`build/ci-tools/actionlint .github/workflows/ci.yml`（工具不提交）。
+本轮本地通过 GCC/Clang 的 Debug/Release、ASan/UBSan、TSan，六配置各 40 个 CTest；
+另通过强制 FetchContent 发现路径的真实 libuv/co2 构建、独立安装及 39 个 CTest（使用本地 source override，
+libuv 源自校验过的官方 v1.48.0 归档，不测试 Git 下载）。actionlint 1.7.12 检查通过。
+Release 检查发现 fs 测试的替代 new/delete 被 GCC 优化误报，单独用 noinline 保持 hook 边界，
+未放宽 -Werror 或关闭 sanitizer。日志为 build/ci-local-*-{config,build,test}.log；红例 build/ci-gcc-release-red.log。
+GitHub runner、macOS、Windows 及全新 Git 下载尚未运行；以上不是远程 CI 已绿的声明。
+QNX 有 libuv 上游移植，但不代表 uvco 已验证支持，详见 [QNX 核对记录](docs/qnx.md)。
