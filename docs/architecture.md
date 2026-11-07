@@ -343,6 +343,33 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
   会让 `~Loop` 一直等下去）。
 - 测试在 io_uring 开 / 关两种模式下各跑一遍（ctest 的 `UV_USE_IO_URING=1` / `=0`）。
 
+### 4.9 process（v0.1 之后的扩展）
+
+`uvco/process.hpp` 提供 `uv_spawn` 包装，不使用 shell 隐式解释参数。
+
+- `spawn(loop, ProcessOptions)` 同步返回 `Result<Process>`；`Process` 只可移动，控制块继承
+  `HandleBlock` 并持有 `uv_process_t`。启动失败也异步关闭 libuv 已初始化的 handle。
+- `ProcessOptions`：`file`、`args`（不包含 argv[0]，库自动用 file 补齐）、`env`、`inheritEnv`、
+  `cwd`、`stdio`、`detached`、`setUid/uid`、`setGid/gid`。空 env 默认继承父环境；
+  `inheritEnv=false` 且空 env 表示空环境；非空 env 为完整替换而非增量覆盖。
+- stdio 默认忽略三个标准描述符；`ProcessStdio::ignore()`、`inherit(fd)`、`inherit(Pipe&)`、
+  `createPipe(Pipe&, childReads, childWrites)`。方向按子进程视角：stdin 是 childReads，stdout
+  是 childWrites。调用者先创建同一 Loop 上尚未打开的 Pipe，再把它传给 createPipe；spawn 后它就是
+  父端 stream，继续使用现有 read/write/shutdown/close。指针仅在 spawn 调用期间使用。
+- `pid()` 返回 pid；`kill(signum)` 返回 Result<void>，仅显式调用才发送信号。
+- `wait()` → `Result<ExitStatus{exit_status, term_signal}>`。退出回调缓存结果，退出后再等立即完成，
+  可以重复等待；同一时刻只能有一个 wait（含完成但尚未恢复的阶段，违反则契约失败）。
+  libuv 退出回调内联恢复；取消和 close 经 Loop 调度恢复。
+- stop_token 只取消等待（canceled），不杀进程；预先停止优先于已缓存的退出结果。
+  取消后可再次 wait。close/Loop 析构中止等待为 aborted。
+- 析构/close 不杀子进程。正常路径应先 wait 再 close；运行中关闭 handle 会停止 libuv 的退出监视，
+  POSIX 调用者需自行处理之后的 waitpid/reaping，可能留下僵尸，库不提供后台 reaper。
+  析构时有挂起 wait 仍沿用通用 Handle 契约：先取消并恢复，或显式 close 中止；不能直接析构。
+- detached 只设置 UV_PROCESS_DETACHED，不自动 unref：持有的运行中 Process 仍保活 Loop。
+  Loop 析构关闭 handle 而不等待子进程退出；控制块成为孤儿，之后只可 close/析构。
+- 线程约束、关闭 awaiter 和控制块保活协议均复用 §4.2。WaitAwaiter 自带 CancelHook，体积超出
+  co2 内联槽，直接 await 的时候有一次 awaiter 堆分配（本模块不承诺零分配）。
+
 ## 5. v0.1 范围（已定）
 
 | 模块 | 包含 |
@@ -503,3 +530,19 @@ timer 已经遵循这一规则（§8 原待定问题据此关闭）。
   确定性用例只在 `UV_USE_IO_URING=0` 那一遍走到 release 路径；io_uring 那一遍只检查不泄漏，
   另用“阻塞在空 FIFO 上的 read 被取消后照常完成”覆盖 `EBUSY` 路径。TSan 构建不能替换全局
   `operator new`，零分配断言在 TSan 下跳过。
+
+
+### 实现 process 时记录
+
+- process 是 v0.1 完成后的新增模块，不改变原 v0.1 范围表；§7 的用户持有 Loop、通用句柄控制块
+  和契约策略继续适用。不是 ReqAwaiter：uv_spawn 是同步启动 + handle 退出回调，而非单次请求。
+- 参考本地 kotatsu `src/async/io/process.cpp`，其实现使用 sys::Child、pidfd/kqueue/平台 Watch 和
+  orphan reaper；这里按批准设计保持纯 uv_spawn，借鉴缓存退出结果/单等待槽，不引入自建 reaper。
+- pipe 采用调用者提供的 Pipe，而不是 Process 内藏三个流：所有权明确，spawn 失败后的 Pipe
+  仍由调用者 close/析构。没有 communicate/capture 等缓冲便捷层。
+- stdio 方向及互斥类型、字符串内嵌 NUL 等参数先校验，避免部分 libuv 参数错误触发断言。
+- 测试依赖 Linux 的 /bin/sh、echo、cat、true、false、sleep、/proc/self/fd、waitpid。
+  uid/gid 字段按 libuv 转发，尚未在权限切换环境或 Windows/macOS 验证。
+- 四套构建通过；process 测试在 ASan/UBSan 额外连续 20 遍、TSan 全套 20 遍通过。
+  ASan 全套并行重复曾遇旧 sync_tests.cpp:980 的 elapsed >= 9 && elapsed < 1000 计时断言失败，
+  无 sanitizer 报告；未改无关测试，全套串行重复 10 遍通过。

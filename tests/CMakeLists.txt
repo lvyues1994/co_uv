@@ -15,7 +15,7 @@ function(uvco_configure_test target)
 endfunction()
 
 foreach(name IN ITEMS result_tests loop_tests thread_tests req_awaiter_tests timer_tests
-                      sync_tests stream_tests udp_tests fs_tests lifecycle_tests
+                      sync_tests stream_tests udp_tests fs_tests process_tests lifecycle_tests
                       run_wrong_thread_contract_test orphan_handle_use_contract_test timer_pending_destroy_contract_test
                       sync_event_destroy_contract_test sync_when_any_empty_contract_test
                       stream_concurrent_read_contract_test udp_concurrent_recv_contract_test)
@@ -61,3 +61,5 @@ foreach(header IN LISTS uvco_public_headers)
 endforeach()
 add_library(uvco-header-self-containment OBJECT ${uvco_header_sources})
 uvco_configure_test(uvco-header-self-containment)
+
+target_compile_definitions(uvco-process-tests PRIVATE UVCO_TEST_PROCESS_DIR="${CMAKE_CURRENT_BINARY_DIR}")

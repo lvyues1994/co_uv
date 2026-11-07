@@ -4,7 +4,7 @@
 设计见 [docs/architecture.md](docs/architecture.md)。
 
 当前进度：v0.1 第 1 步 **core**（`Result<T>`、`Loop`、`run()`、`detail::ReqAwaiter`）、第 2 步 **timer**（`sleep()`、`Timer`、通用句柄生命周期）、第 3 步 **sync**（`Event`、`Mutex`、`Channel<T>`、`whenAny`、`timeout`）、第 4 步 **stream**（`Tcp`、`Pipe`：拉模式 read、write、shutdown、listen/accept、connect）、第 5 步 **udp**（`Udp`：拉模式 recv 返回 `Datagram`、send、connect）、第 6 步 **fs**（`File`、`open`/`stat`/`unlink`/`mkdir`/`rename`/`mkstemp`/`scandir`/`copyfile`/`sendfile` 等、`readFile`/`writeFile`，迟到取消不泄漏 fd）。
-v0.1 范围（文档 §5）已全部实现；dns、work、process/signal/tty/poll 留待后续。
+v0.1 范围（文档 §5）已全部实现；另已增加 **process**（`spawn`、可取消 `wait`、`kill`、stdio Pipe）；dns、work、signal/tty/poll 留待后续。
 
 ## 要求
 
@@ -49,3 +49,12 @@ int main() {
 
 错误以 `uvco::Result<T>` 返回（错误码即 libuv 的负 errno，`message()` 走 `uv_strerror`，
 可转换为 `std::error_code`，category 名为 `"uv"`）；用法错误是契约违规而非异常。
+
+
+## 子进程
+
+包含 `<uvco/process.hpp>`。`ProcessOptions::args` 不含 argv[0]；`spawn(loop, options)` 返回
+`Result<Process>`，`CO2_AWAIT_SET(status, process.wait())` 得到退出码/信号。
+`ProcessStdio::createPipe(pipe, childReads, childWrites)` 使用现有 `Pipe` 作为父端；方向按子进程视角。
+取消 wait 不会杀子进程；必须显式 `kill(signum)`。建议先 wait 再 close；析构不杀进程，提前关闭后
+POSIX 调用者需自行回收子进程。完整生命周期语义见设计文档 §4.9。
