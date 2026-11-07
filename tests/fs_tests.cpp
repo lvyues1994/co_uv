@@ -46,13 +46,21 @@ std::atomic<std::size_t> gNews{0};
 } // namespace
 
 #if UVCO_TEST_COUNT_NEW
-void* operator new(std::size_t const size) {
+// Keep the matching malloc/free replacement pair opaque to GCC's optimized
+// mismatched-new-delete heuristic. Do not weaken -Werror or sanitizer checks.
+#if defined(__GNUC__)
+#define UVCO_TEST_ALLOC_HOOK __attribute__((noinline))
+#else
+#define UVCO_TEST_ALLOC_HOOK
+#endif
+UVCO_TEST_ALLOC_HOOK void* operator new(std::size_t const size) {
     gNews.fetch_add(1, std::memory_order_relaxed);
     if (void* const p = std::malloc(size == 0 ? 1 : size)) return p;
     throw std::bad_alloc{};
 }
-void operator delete(void* const p) noexcept { std::free(p); }
-void operator delete(void* const p, std::size_t) noexcept { std::free(p); }
+UVCO_TEST_ALLOC_HOOK void operator delete(void* const p) noexcept { std::free(p); }
+UVCO_TEST_ALLOC_HOOK void operator delete(void* const p, std::size_t) noexcept { std::free(p); }
+#undef UVCO_TEST_ALLOC_HOOK
 #endif
 
 namespace {
