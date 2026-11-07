@@ -6,6 +6,8 @@
 #include <utility>
 #include "uvco/detail/libuv.hpp"
 #include "uvco/fs/detail/watch.hpp"
+#include "uvco/detail/watcher/event_port.hpp"
+#include "uvco/detail/watcher/native.hpp"
 
 namespace uvco {
 namespace fs {
@@ -24,24 +26,33 @@ struct FsEventMerge {
     }
 };
 
-class FsEventBlock final : public WatchBlock<FsEventInfo, FsEventMerge> {
+struct FsEventBackend {
+    using Handle = uv_fs_event_t;
+    static int init(uv_loop_t* l, Handle* h) noexcept { return uv_fs_event_init(l, h); }
+    static int start(Handle* h, uv_fs_event_cb cb, char const* path, unsigned int flags) noexcept {
+        return uv_fs_event_start(h, cb, path, flags);
+    }
+    static int stop(Handle* h) noexcept { return uv_fs_event_stop(h); }
+};
+using FsEventPort = ::uvco::detail::watcher::EventPort<FsEventInfo,
+    ::uvco::detail::watcher::BoundedFifo<FsEventInfo, 32, FsEventMerge>>;
+class FsEventBlock final : public ::uvco::detail::watcher::NativeWatcherBlock<FsEventBackend, FsEventPort> {
+    using Base = ::uvco::detail::watcher::NativeWatcherBlock<FsEventBackend, FsEventPort>;
   public:
-    FsEventBlock(Loop& loop, int& status) noexcept : WatchBlock{loop} {
-        status = uv_fs_event_init(loop.raw(), &event_);
-        if (status == 0) bindHandle(); // ENOSYS leaves no native handle to close
+    FsEventBlock(Loop& loop, int& status) noexcept : Base{loop} {
+        status = init(); // ENOSYS leaves no native handle to close
     }
     ~FsEventBlock() override = default;
     Result<void> start(char const* path, unsigned int flags) noexcept {
-        return fromStatus(uv_fs_event_start(&event_, &FsEventBlock::onEvent, path, flags));
+        return fromStatus(startNative(&FsEventBlock::onEvent, path, flags));
     }
     Result<void> stop() noexcept {
         if (closing()) return Errc::aborted;
-        auto result = fromStatus(uv_fs_event_stop(&event_));
+        auto result = fromStatus(stopNative());
         if (result) abortPending();
         return result;
     }
   private:
-    uv_handle_t* uvHandle() noexcept override { return reinterpret_cast<uv_handle_t*>(&event_); }
     static void onEvent(uv_fs_event_t* handle, char const* filename, int events, int status) noexcept {
         auto& self = fromData<FsEventBlock>(handle->data);
         if (status < 0) {
@@ -62,7 +73,6 @@ class FsEventBlock final : public WatchBlock<FsEventInfo, FsEventMerge> {
         }
         self.publish(std::move(result), std::move(exception)); // no self access after resume
     }
-    uv_fs_event_t event_{};
 };
 
 inline Result<void> checkFsEventFlags(unsigned int flags) noexcept {
@@ -115,6 +125,7 @@ class FsEvent : public ::uvco::detail::Handle<detail::FsEventBlock> {
         Base::operator=(std::move(*replacement));
         return {};
     }
+    Result<void> start(std::string path, unsigned int flags = 0) { return watch(std::move(path), flags); }
     Result<void> stop() noexcept { return block().stop(); }
     bool isActive() const noexcept { return block().isActive(); }
     UVCO_NODISCARD detail::WatchAwaiter<detail::FsEventBlock> next() noexcept { return detail::WatchAwaiter<detail::FsEventBlock>{block()}; }
