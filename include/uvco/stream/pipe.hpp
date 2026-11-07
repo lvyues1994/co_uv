@@ -89,6 +89,15 @@ class Pipe : public detail::StreamHandle<detail::PipeBlock, Pipe> {
     Pipe() noexcept = default; // 空句柄
     explicit Pipe(Loop& loop) : Base{new detail::PipeBlock{loop}} {}
 
+    // Ownership transfers only on success. On failure caller retains fd;
+    // native open may still have changed descriptor flags (e.g. nonblocking).
+    static Result<Pipe> open(Loop& loop, uv_file fd) {
+        Pipe stream{loop};
+        int const status=uv_pipe_open(stream.raw(),fd);
+        if(status<0)return static_cast<Errc>(status);
+        return Result<Pipe>{std::move(stream)};
+    }
+
     Result<void> bind(std::string const& path) noexcept {
         return fromStatus(uv_pipe_bind(raw(), path.c_str()));
     }

@@ -76,6 +76,15 @@ class Tcp : public detail::StreamHandle<detail::TcpBlock, Tcp> {
     Tcp() noexcept = default;
     explicit Tcp(Loop& loop) : Base{new detail::TcpBlock{loop}} {}
 
+    // Ownership transfers only on success. On failure caller retains fd;
+    // native open may still have changed descriptor flags (e.g. nonblocking).
+    static Result<Tcp> open(Loop& loop, uv_os_sock_t fd) {
+        Tcp stream{loop};
+        int const status=uv_tcp_open(stream.raw(),fd);
+        if(status<0)return static_cast<Errc>(status);
+        return Result<Tcp>{std::move(stream)};
+    }
+
     // flags：例如 UV_TCP_IPV6ONLY。
     Result<void> bind(SocketAddress const& address, unsigned const flags = 0) noexcept {
         return fromStatus(uv_tcp_bind(raw(), address.raw(), flags));

@@ -14,12 +14,12 @@ function(uvco_configure_test target)
     endif()
 endfunction()
 
-set(uvco_test_names capture_tests wait_slot_tests work_tests dns_tests when_all_results_tests when_any_exception_tests process_portable_tests result_tests loop_tests thread_tests timer_tests sync_tests udp_tests lifecycle_tests
+set(uvco_test_names buffered_reader_tests capture_tests wait_slot_tests work_tests dns_tests when_all_results_tests when_any_exception_tests process_portable_tests result_tests loop_tests thread_tests timer_tests sync_tests udp_tests lifecycle_tests
     run_wrong_thread_contract_test orphan_handle_use_contract_test timer_pending_destroy_contract_test
     sync_event_destroy_contract_test sync_when_any_empty_contract_test
     stream_concurrent_read_contract_test udp_concurrent_recv_contract_test)
 if(UNIX)
-    list(APPEND uvco_test_names stream_tests req_awaiter_tests)
+    list(APPEND uvco_test_names stream_tests req_awaiter_tests fd_adoption_tests)
 endif()
 # FIFO, /proc/self/fd and waitpid lifecycle tests are Linux-specific.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")

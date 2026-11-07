@@ -5,3 +5,5 @@
 #include "uvco/stream/pipe.hpp"
 #include "uvco/stream/stream.hpp"
 #include "uvco/stream/tcp.hpp"
+
+#include "uvco/stream/buffered_reader.hpp"
