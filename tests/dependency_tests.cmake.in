@@ -17,7 +17,7 @@ function(reject diagnostic)
 endfunction()
 set(deps "${work}/deps")
 if(NOT "@co2_BINARY_DIR@" STREQUAL "")
-    run("@CMAKE_COMMAND@" --install "@co2_BINARY_DIR@" --prefix "${deps}" --config "${CONFIG}")
+    run("@CMAKE_COMMAND@" "-DCMAKE_INSTALL_PREFIX=${deps}" "-DCMAKE_INSTALL_CONFIG_NAME=${CONFIG}" -P "@co2_BINARY_DIR@/cmake_install.cmake")
 endif()
 file(WRITE "${work}/valid/lib/cmake/libuv/libuvConfig.cmake"
     "add_library(libuv::uv INTERFACE IMPORTED)\nset_target_properties(libuv::uv PROPERTIES INTERFACE_LINK_LIBRARIES \"@UVCO_LIBUV_LINK_LIBRARIES@\" INTERFACE_INCLUDE_DIRECTORIES \"@UVCO_LIBUV_INCLUDE_DIRS@\")\n")
@@ -33,13 +33,13 @@ string(REPLACE ";" "\;" prefix "${prefix}")
 # Installed co2 + libuv CMake-package discovery, followed by package consumption.
 run("@CMAKE_COMMAND@" -S "@PROJECT_SOURCE_DIR@" -B "${work}/cmake-provider" ${common}
     "-DCMAKE_PREFIX_PATH=${prefix}" -DUVCO_BUILD_TESTS=OFF -DUVCO_ENABLE_INSTALL=ON)
-run("@CMAKE_COMMAND@" --install "${work}/cmake-provider" --prefix "${work}/stage" --config "${CONFIG}")
+run("@CMAKE_COMMAND@" "-DCMAKE_INSTALL_PREFIX=${work}/stage" "-DCMAKE_INSTALL_CONFIG_NAME=${CONFIG}" -P "${work}/cmake-provider/cmake_install.cmake")
 set(consumer_prefix "${work}/stage;${work}/valid;${deps};@CMAKE_PREFIX_PATH@")
 string(REPLACE ";" "\;" consumer_prefix "${consumer_prefix}")
 run("@CMAKE_COMMAND@" -S "@PROJECT_SOURCE_DIR@/tests/consumer" -B "${work}/cmake-consumer" ${common}
     "-DCMAKE_PREFIX_PATH=${consumer_prefix}")
 run("@CMAKE_COMMAND@" --build "${work}/cmake-consumer" --config "${CONFIG}" --parallel 2)
-run("@CMAKE_CTEST_COMMAND@" --test-dir "${work}/cmake-consumer" -C "${CONFIG}" --output-on-failure)
+run("@CMAKE_COMMAND@" -E chdir "${work}/cmake-consumer" "@CMAKE_CTEST_COMMAND@" -C "${CONFIG}" --output-on-failure)
 # Old headers must be rejected even when the CMake package declares no version.
 reject("requires libuv >= 1.40" "@CMAKE_COMMAND@" -S "@PROJECT_SOURCE_DIR@" -B "${work}/old-source" ${common}
     "-DCMAKE_PREFIX_PATH=${prefix}" "-Dlibuv_DIR=${work}/old/lib/cmake/libuv" -DUVCO_BUILD_TESTS=OFF -DUVCO_ENABLE_INSTALL=OFF)
@@ -67,14 +67,14 @@ string(REPLACE ";" "\;" fetch_prefix "${fetch_prefix}")
 run("@CMAKE_COMMAND@" -S "@PROJECT_SOURCE_DIR@" -B "${work}/fetch-provider" ${common}
     "-DCMAKE_PREFIX_PATH=${fetch_prefix}" -DCMAKE_DISABLE_FIND_PACKAGE_libuv=TRUE -DCMAKE_DISABLE_FIND_PACKAGE_PkgConfig=TRUE
     "-DFETCHCONTENT_SOURCE_DIR_LIBUV=${work}/libuv-source" -DUVCO_BUILD_TESTS=OFF -DUVCO_ENABLE_INSTALL=ON)
-run("@CMAKE_COMMAND@" --install "${work}/fetch-provider" --prefix "${work}/fetch-stage" --config "${CONFIG}")
+run("@CMAKE_COMMAND@" "-DCMAKE_INSTALL_PREFIX=${work}/fetch-stage" "-DCMAKE_INSTALL_CONFIG_NAME=${CONFIG}" -P "${work}/fetch-provider/cmake_install.cmake")
 
 set(fetch_consumer_prefix "${work}/fetch-stage;${work}/valid;${deps};@CMAKE_PREFIX_PATH@")
 string(REPLACE ";" "\;" fetch_consumer_prefix "${fetch_consumer_prefix}")
 run("@CMAKE_COMMAND@" -S "@PROJECT_SOURCE_DIR@/tests/consumer" -B "${work}/fetch-consumer" ${common}
     "-DCMAKE_PREFIX_PATH=${fetch_consumer_prefix}")
 run("@CMAKE_COMMAND@" --build "${work}/fetch-consumer" --config "${CONFIG}" --parallel 2)
-run("@CMAKE_CTEST_COMMAND@" --test-dir "${work}/fetch-consumer" -C "${CONFIG}" --output-on-failure)
+run("@CMAKE_COMMAND@" -E chdir "${work}/fetch-consumer" "@CMAKE_CTEST_COMMAND@" -C "${CONFIG}" --output-on-failure)
 file(WRITE "${work}/libuv-source/CMakeLists.txt"
     "cmake_minimum_required(VERSION 3.14)\nproject(libuv LANGUAGES C)\nadd_library(uv_a INTERFACE)\nset_target_properties(uv_a PROPERTIES INTERFACE_INCLUDE_DIRECTORIES \"${work}/old/include\")\n")
 reject("requires libuv >= 1.40" "@CMAKE_COMMAND@" -S "@PROJECT_SOURCE_DIR@" -B "${work}/fetch-old-provider" ${common}
@@ -85,7 +85,7 @@ file(MAKE_DIRECTORY "${work}/old/lib/pkgconfig")
 string(REPLACE ";" " " libs "@UVCO_LIBUV_LINK_LIBRARIES@")
 file(WRITE "${work}/old/lib/pkgconfig/libuv.pc"
     "Name: libuv\nDescription: header mismatch fixture\nVersion: 1.48.0\nLibs: ${libs}\nCflags: -I${work}/old/include\n")
-run("@CMAKE_COMMAND@" --install "@PROJECT_BINARY_DIR@" --prefix "${work}/pkg-stage" --component uvco --config "${CONFIG}")
+run("@CMAKE_COMMAND@" "-DCMAKE_INSTALL_PREFIX=${work}/pkg-stage" "-DCMAKE_INSTALL_CONFIG_NAME=${CONFIG}" "-DCMAKE_INSTALL_COMPONENT=uvco" -P "@PROJECT_BINARY_DIR@/cmake_install.cmake")
 set(pkg_prefix "${work}/pkg-stage;${deps};@CMAKE_PREFIX_PATH@")
 string(REPLACE ";" "\;" pkg_prefix "${pkg_prefix}")
 reject("libuv headers < 1.40" "@CMAKE_COMMAND@" -E env "PKG_CONFIG_LIBDIR=${work}/old/lib/pkgconfig" "PKG_CONFIG_PATH="
