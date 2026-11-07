@@ -43,7 +43,8 @@ TEST_CASE("signal validation rejects SIGPIPE and counting saturates") {
     buffer.push({uvco::SignalEvent{1,(std::numeric_limits<std::uint64_t>::max)(),false},{}});
     buffer.push({uvco::SignalEvent{1,1,false},{}});
     auto record=buffer.pop(); CHECK(record.result->count==(std::numeric_limits<std::uint64_t>::max)());
-    CHECK(record.result->saturated);
+    CHECK(record.result->saturated); CHECK(buffer.stats().saturated);
+    buffer.clear(); CHECK(buffer.stats().saturated);
 }
 #ifndef _WIN32
 TEST_CASE("signal notifications broadcast independently to two watchers") {

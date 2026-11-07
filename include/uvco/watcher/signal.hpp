@@ -25,7 +25,20 @@ struct SignalMerge {
         return true;
     }
 };
-using SignalCount = watcher::ReduceOne<SignalEvent, SignalMerge>;
+class SignalCount : public watcher::ReduceOne<SignalEvent, SignalMerge> {
+    using Base = watcher::ReduceOne<SignalEvent, SignalMerge>;
+  public:
+    void push(watcher::DeliveryRecord<SignalEvent> record) noexcept {
+        Base::push(std::move(record));
+        if (!empty() && front().result && front().result->saturated) saturated_ = true;
+    }
+    void offer(watcher::DeliveryRecord<SignalEvent> record) noexcept { push(std::move(record)); }
+    watcher::DeliveryStats stats() const noexcept {
+        auto out = Base::stats(); out.saturated = out.saturated || saturated_; return out;
+    }
+  private:
+    bool saturated_ = false; // history, retained across clear/stop like other diagnostics
+};
 struct SignalBackend {
     using Handle = uv_signal_t;
     static int init(uv_loop_t* l, Handle* h) noexcept { return uv_signal_init(l, h); }
@@ -110,6 +123,7 @@ class Signal : public detail::Handle<detail::SignalBlock> {
     Result<void> stop() noexcept { return block().stop(); }
     bool isActive() const noexcept { return block().isActive(); }
     std::size_t queued() const noexcept { return block().queued(); }
+    detail::watcher::DeliveryStats stats() const noexcept { return block().stats(); }
     std::uint64_t coalescedCount() const noexcept { return block().coalescedCount(); }
     UVCO_NODISCARD detail::watcher::NextAwaiter<detail::SignalBlock> next() noexcept {
         return detail::watcher::NextAwaiter<detail::SignalBlock>{block()};
