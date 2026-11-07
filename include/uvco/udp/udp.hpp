@@ -407,6 +407,20 @@ class Udp : public detail::Handle<detail::UdpBlock> {
         return detail::UdpRecvAwaiter{block(), buf};
     }
 
+    Result<void> setMembership(std::string const& group,std::string const& interface,uv_membership membership) noexcept {
+        return fromStatus(uv_udp_set_membership(raw(),group.c_str(),interface.empty()?nullptr:interface.c_str(),membership));
+    }
+    Result<void> setSourceMembership(std::string const& group,std::string const& interface,std::string const& source,uv_membership membership) noexcept {
+        return fromStatus(uv_udp_set_source_membership(raw(),group.c_str(),interface.empty()?nullptr:interface.c_str(),source.c_str(),membership));
+    }
+    Result<void> setMulticastLoop(bool enable) noexcept {return fromStatus(uv_udp_set_multicast_loop(raw(),enable?1:0));}
+    Result<void> setMulticastTtl(int ttl) noexcept {return fromStatus(uv_udp_set_multicast_ttl(raw(),ttl));}
+    Result<void> setMulticastInterface(std::string const& interface) noexcept {
+        return fromStatus(uv_udp_set_multicast_interface(raw(),interface.empty()?nullptr:interface.c_str()));
+    }
+    std::size_t sendQueueSize() const noexcept {return uv_udp_get_send_queue_size(raw());}
+    std::size_t sendQueueCount() const noexcept {return uv_udp_get_send_queue_count(raw());}
+
     Result<void> setBroadcast(bool const enable) noexcept {
         return fromStatus(uv_udp_set_broadcast(raw(), enable ? 1 : 0));
     }
