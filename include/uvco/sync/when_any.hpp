@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <exception>
 #include <new>
+#include <memory>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -527,8 +528,7 @@ template <class V> class WhenAnyRange {
     using Value = WhenAnyRangeResult<Success>;
 
     explicit WhenAnyRange(std::vector<co2::Task<V>> tasks)
-        : tasks_(std::move(tasks)), slots_(tasks_.size()), ends_(tasks_.size()),
-          exceptions_(tasks_.size()), children_(tasks_.size()) {
+        : tasks_(std::move(tasks)), entries_(new Entry[tasks_.size()]) {
         UVCO_CONTRACT_CHECK(not tasks_.empty()); // 没有分支就没有胜者
     }
 
@@ -549,8 +549,8 @@ template <class V> class WhenAnyRange {
                 break;
             }
             UVCO_CONTRACT_CHECK(static_cast<bool>(tasks_[index]));
-            children_[index].arm(this, index);
-            ::uvco::detail::co2compat::TaskAccess::arm(tasks_[index], children_[index].handle(),
+            entries_[index].child.arm(this, index);
+            ::uvco::detail::co2compat::TaskAccess::arm(tasks_[index], entries_[index].child.handle(),
                                          state_.source.get_token())
                 .resume();
         }
@@ -561,22 +561,22 @@ template <class V> class WhenAnyRange {
         if (state_.stoppedEarly) return Result<Value>{Errc::canceled};
         std::size_t const exception = state_.firstException.load(std::memory_order_acquire);
         if (exception != RaceState::none) {
-            UVCO_CONTRACT_CHECK(exceptions_[exception] != nullptr);
-            std::rethrow_exception(exceptions_[exception]);
+            UVCO_CONTRACT_CHECK(entries_[exception].exception != nullptr);
+            std::rethrow_exception(entries_[exception].exception);
         }
         std::size_t const error = state_.firstError.load(std::memory_order_acquire);
-        if (error != RaceState::none) return Result<Value>{errorOf(slots_[error], IsResult<V>{})};
+        if (error != RaceState::none) return Result<Value>{errorOf(entries_[error].slot, IsResult<V>{})};
         std::size_t const decider = state_.decider.load(std::memory_order_acquire);
         UVCO_CONTRACT_CHECK(decider != RaceState::none);
-        if (ends_[decider] == BranchEnd::cancelled) return Result<Value>{Errc::canceled};
+        if (entries_[decider].end == BranchEnd::cancelled) return Result<Value>{Errc::canceled};
         Result<Value> out{Errc::canceled};
-        deliver(slots_[decider], Make{&out, decider});
+        deliver(entries_[decider].slot, Make{&out, decider});
         return out;
     }
 
     co2::coroutine_handle<> branchDone(std::size_t const index) noexcept {
-        ends_[index] = collect(tasks_[index], slots_[index], exceptions_[index]);
-        return state_.branchDone(index, ends_[index]);
+        entries_[index].end = collect(tasks_[index], entries_[index].slot, entries_[index].exception);
+        return state_.branchDone(index, entries_[index].end);
     }
 
   private:
@@ -589,11 +589,14 @@ template <class V> class WhenAnyRange {
     };
 
     std::vector<co2::Task<V>> tasks_;
-    std::vector<::uvco::detail::co2compat::ResultStorage<V>> slots_;
-    std::vector<BranchEnd> ends_;
-    std::vector<std::exception_ptr> exceptions_;
+    struct Entry {
+        ::uvco::detail::co2compat::ResultStorage<V> slot;
+        BranchEnd end=BranchEnd::notStarted;
+        std::exception_ptr exception;
+        RaceChild<WhenAnyRange> child{};
+    };
+    std::unique_ptr<Entry[]> entries_;
     RaceState state_;
-    std::vector<RaceChild<WhenAnyRange>> children_;
 };
 
 template <class V> std::vector<co2::Task<V>> toTasks(std::vector<co2::Task<V>> tasks) {

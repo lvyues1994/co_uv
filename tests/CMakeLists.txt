@@ -108,3 +108,18 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 set_tests_properties(uvco-work-tests PROPERTIES TIMEOUT 30)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(uvco-range-storage-tests range_storage_tests.cpp)
+    uvco_configure_test(uvco-range-storage-tests)
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        set(_uvco_new_symbol _Znwm)
+    else()
+        set(_uvco_new_symbol _Znwj)
+    endif()
+    target_compile_definitions(uvco-range-storage-tests PRIVATE
+        UVCO_TEST_REAL_NEW=__real_${_uvco_new_symbol} UVCO_TEST_WRAP_NEW=__wrap_${_uvco_new_symbol})
+    target_link_options(uvco-range-storage-tests PRIVATE "-Wl,--wrap=${_uvco_new_symbol}")
+    add_test(NAME uvco-range-storage-tests COMMAND uvco-range-storage-tests)
+    unset(_uvco_new_symbol)
+endif()
