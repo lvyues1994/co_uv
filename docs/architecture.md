@@ -858,3 +858,13 @@ CMake 3.14 的命令兼容性保留但未实机运行；Windows/macOS、多配�
 迁移完成后 g++、clang++、ASan+UBSan、TSan 各 50 个 CTest 目标全量重复三次通过，含安装/consumer/两 TU/header 检查。
 Signal 独立测试进程重复 20 次通过，覆盖同号双 watcher、跨线程双 Loop、SIGCHLD/Process、取消/close/restart 与饱和。
 后续模块仍以设计文档为待实现项，不能把通过本地 Linux 测试当成 Windows/macOS 已验证。
+
+### phase hook 与高级 awaitable
+
+Idle/Prepare/Check 共用三个薄 typed backend 与一个 PhaseBlock；只多一个本 watcher 的饱和 sequence。
+HookSink 按值持有同步 noexcept callable，默认 unref，不附带 EventPort 的槽/队列/CancelHook。
+EventPort 适配采用 latest-only + deferred resume；start 幂等且保留 sequence，stop 清缓存、中止 pending next。
+onPrepare/onCheck 自动启动；onIdle 初始停止，避免注册即 CPU spin。高级 facade 默认 ref、初始停止。
+Prepare/Check 不提供 poll wakeup/下一轮保证；没有 hidden idle。既有 yieldNextTurn 测试保持通过。
+策略统一 offer/take/empty/clear/stats；Latest 覆盖（含相同错误），FIFO 相邻相同错误合并，规则不互相污染。
+新增阶段顺序测试用主动启动的 Idle 驱动 Event，不靠毫秒阈值；另测 unref、deferred commit、预取消、stop 与 Loop 先销毁。

@@ -19,6 +19,11 @@ template<class Backend, class Sink> class NativeWatcherBlock : public Sink {
         return status;
     }
     Native* raw() noexcept { return &native_; }
+    bool isActive() noexcept { return !this->closing() && uv_is_active(uvHandle()) != 0; }
+    bool hasRef() noexcept { return uv_has_ref(uvHandle()) != 0; }
+    void setReferenced(bool referenced) noexcept {
+        if (referenced) uv_ref(uvHandle()); else uv_unref(uvHandle());
+    }
   protected:
     template<class... Args> int startNative(Args&&... args) noexcept {
         return Backend::start(&native_, std::forward<Args>(args)...);
@@ -41,6 +46,7 @@ template<class E, class F> class HookSink : public HandleBlock {
         if (!closing()) callback_(event); // no this access after callback
     }
     void abortPending() noexcept override {}
+    void stopDelivery() noexcept {}
   private:
     F callback_;
 };

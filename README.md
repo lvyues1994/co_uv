@@ -291,3 +291,23 @@ Signal 计数是 libuv 回调数（不是内核发送数），按 watcher 独立
 信号 disposition 是进程级资源，不承诺与外部 sigaction 无损共存。
 Windows 只接受可实际接收的 INT/BREAK/HUP/WINCH（受控制台限制；本地未验证）。
 详见 [统一 watcher 设计](docs/design-watchers.md)。
+
+### Loop phase：hook 优先
+
+```cpp
+auto hook = uvco::onPrepare(loop, [](uvco::PhaseEvent e) noexcept {
+    // 原生 prepare 阶段；短小、noexcept；不嵌套 run/销毁 Loop
+}); // Result<PhaseHook<...>>；已启动、默认 unref
+
+auto idle = uvco::onIdle(loop, [](uvco::PhaseEvent) noexcept { /* ... */ });
+if (idle) idle->start(); // Idle 必须显式启动；即使 unref 仍可能让 poll 空转
+
+auto check = uvco::Check::create(loop); // 高级适配，初始停止、默认 ref
+if (check) check->start();
+CO2_AWAIT_SET(seen, check->next());     // latest-only，延后恢复；不是 next-turn 保证
+```
+
+`onPrepare/onCheck` 自动启动；`onIdle` 保守地保持停止。
+Hook 按值持有 noexcept callable，无 std::function/等待者/每事件分配；用 stop/close/RAII 停止。
+高级 `Idle/Prepare/Check` 的 next 支持 stop_token、单等待者与共用诊断 stats。
+Prepare/Check 的 ref 不会唤醒阻塞 poll，真正跨轮继续用 `yieldNextTurn`。
