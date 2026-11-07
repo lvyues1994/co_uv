@@ -106,4 +106,17 @@ TEST_CASE("Result of a move-only type") {
     CHECK(not moved);
 }
 
+namespace {
+struct ThrowsCopy {
+ int bits=-7;
+ ThrowsCopy()=default;
+ ThrowsCopy(ThrowsCopy const&) {bits=123; throw 1;}
+ ThrowsCopy& operator=(ThrowsCopy const&)=default;
+};
+}
+TEST_CASE("Result regression: throwing transition leaves a valid error") {
+ uvco::Result<ThrowsCopy> from; uvco::Result<ThrowsCopy> to{uvco::Errc::canceled};
+ try {to=from;CHECK(false);}catch(int){}
+ CHECK(not to && to.error()==uvco::Errc::no_memory);
+}
 UVCO_TEST_MAIN

@@ -1,6 +1,8 @@
 #pragma once
 
 #include <climits>
+#include <exception>
+#include <new>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -220,6 +222,7 @@ class FsOp : public uvco::detail::ReqAwaiter<FsOp<Spec>, uv_fs_t, typename Spec:
     }
 
     Result<T> finish(int const status) {
+        if (exception_) std::rethrow_exception(std::exchange(exception_, {}));
         if (status < 0) return static_cast<Errc>(status);
         return value_.take();
     }
@@ -237,7 +240,15 @@ class FsOp : public uvco::detail::ReqAwaiter<FsOp<Spec>, uv_fs_t, typename Spec:
             release(*req, detail::Releases<Spec>{});
             status = UV_ECANCELED;
         } else {
-            self->value_.set(self->spec_, *req, self->loop());
+            try {
+                self->value_.set(self->spec_, *req, self->loop());
+            } catch (std::bad_alloc const&) {
+                release(*req, detail::Releases<Spec>{});
+                status = UV_ENOMEM;
+            } catch (...) {
+                release(*req, detail::Releases<Spec>{});
+                self->exception_ = std::current_exception();
+            }
         }
         uv_fs_req_cleanup(req);
         Base::complete(req, status);
@@ -245,6 +256,7 @@ class FsOp : public uvco::detail::ReqAwaiter<FsOp<Spec>, uv_fs_t, typename Spec:
 
     Spec spec_{};
     detail::Value<T> value_;
+    std::exception_ptr exception_;
     bool cancelRequested_ = false;
 };
 
@@ -450,7 +462,9 @@ struct MkstempSpec {
         return uv_fs_mkstemp(l, r, tpl.c_str(), cb);
     }
     static TempFile project(uv_fs_t& r, Loop& loop) {
-        return TempFile{File{loop, static_cast<uv_file>(r.result)}, r.path};
+        // Allocate before taking fd ownership: callback release owns it on throw.
+        std::string path{r.path};
+        return TempFile{File{loop, static_cast<uv_file>(r.result)}, std::move(path)};
     }
     static void release(uv_fs_t& r) noexcept {
         closeSync(static_cast<uv_file>(r.result));

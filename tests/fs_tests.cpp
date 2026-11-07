@@ -443,6 +443,23 @@ TEST_CASE("fs regression: unawaited close owns fd") {
  {fs::File file{loop,fd};auto op=file.close();}
  bool leaked=::fcntl(fd,F_GETFD)!=-1;if(leaked)::close(fd); CHECK(not leaked);
 }
+namespace {
+struct ThrowProject {
+ using value_type=std::string;
+ std::string path;
+ int submit(uv_loop_t* l,uv_fs_t* r,uv_fs_cb cb)const{return uv_fs_stat(l,r,path.c_str(),cb);}
+ static std::string project(uv_fs_t&,uvco::Loop&){throw std::bad_alloc{};}
+};
+using ThrowOp=fs::FsOp<ThrowProject>;
+auto projectFail(ThrowOp& op)
+ CO2_BEG(co2::Task<Result<std::string>>, (op),Result<std::string> r;) {
+ CO2_AWAIT_SET(r,op);CO2_RETURN(r);
+} CO2_END
+}
+TEST_CASE("fs regression: bad_alloc in callback completes as no_memory and cleans request") {
+ uvco::Loop loop;ThrowOp op{loop,std::string{UVCO_TEST_TMP_DIR}};
+ auto r=uvco::run(loop,projectFail(op));CHECK(not r && r.error()==Errc::no_memory);
+}
 int main() {
     int const rc = ::uvco_test::runAll();
     static_cast<void>(::rmdir(scratch().c_str()));

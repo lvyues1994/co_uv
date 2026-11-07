@@ -138,8 +138,14 @@ template <class T> class UVCO_NODISCARD Result {
         destroy();
         hasValue_ = false;
         if (other.hasValue_) {
-            ::new (static_cast<void*>(&value_)) T(std::forward<Other>(other).value_);
-            hasValue_ = true;
+            try {
+                ::new (static_cast<void*>(&value_)) T(std::forward<Other>(other).value_);
+                hasValue_ = true;
+            } catch (...) {
+                // A throwing constructor may already have overwritten union bytes.
+                errc_ = Errc::no_memory;
+                throw;
+            }
         } else {
             errc_ = other.errc_;
         }
