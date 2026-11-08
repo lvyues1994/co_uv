@@ -1,8 +1,14 @@
 #include <cstdio>
 #if __has_include(<uvco/kcp/runtime.hpp>)
 #include <uvco/kcp/runtime.hpp>
+#ifdef __linux__
+#include <dirent.h>
+#endif
 #include <uvco/uvco.hpp>
 #include "test.hpp"
+#ifdef UVCO_TEST_KCP_PENDING_SENDS
+extern "C" int __wrap_uv_udp_try_send(uv_udp_t*,uv_buf_t const[],unsigned,sockaddr const*) {return UV_EAGAIN;}
+#endif
 using namespace uvco;
 using namespace std::chrono_literals;
 auto sendOne(KcpSession& s,KcpMessage data) CO2_BEG(co2::Task<>,(s,data),Result<void> r;) {
@@ -126,6 +132,53 @@ TEST_CASE("KCP byte high water blocks independently of segment high water; cance
     auto s=a->openSession(*b->localAddress(),1,o);CHECK(s);run(loop,byteBudget(loop,*s));
     run(loop,closeH(*s));run(loop,closeH(*a));run(loop,closeH(*b));drain(loop);
 }
+
+struct ExposedSession:KcpSession {
+    explicit ExposedSession(KcpSession&& s):KcpSession{std::move(s)}{}
+    detail::KcpSessionBlock& state(){return block();}
+};
+TEST_CASE("KCP completed receiver retains its lease until take") {
+    Loop loop;auto a=KcpEndpoint::create(loop,local()),b=KcpEndpoint::create(loop,local());CHECK(a&&b);
+    auto first=a->openSession(*b->localAddress(),1),peer=b->openSession(*a->localAddress(),1);CHECK(first&&peer);
+    ExposedSession s{std::move(*first)};detail::RunCompletion completion{loop};Errc error=Errc::aborted;
+    CHECK(s.state().beginReceive(completion.handle(),{},error));
+    run(loop,sendOne(*peer,KcpMessage{'a'}));if(!completion.finished)loop.runUntilStopped(completion.finished);
+    CHECK(!s.state().beginReceive(completion.handle(),{},error)&&error==Errc::busy);
+    auto received=s.state().takeReceive();CHECK(received&&*received==KcpMessage({'a'}));
+    run(loop,closeH(s));run(loop,closeH(*peer));run(loop,closeH(*a));run(loop,closeH(*b));drain(loop);
+}
+TEST_CASE("KCP closing one shared conv leaves its sibling operational") {
+    Loop loop;auto a=KcpEndpoint::create(loop,local()),b=KcpEndpoint::create(loop,local());CHECK(a&&b);
+    auto a1=a->openSession(*b->localAddress(),1),b1=b->openSession(*a->localAddress(),1);
+    auto a2=a->openSession(*b->localAddress(),2),b2=b->openSession(*a->localAddress(),2);CHECK(a1&&b1&&a2&&b2);
+    run(loop,closeH(*a1));run(loop,closeH(*b1));run(loop,both(*a2,*b2));
+    run(loop,closeH(*a2));run(loop,closeH(*b2));run(loop,closeH(*a));run(loop,closeH(*b));drain(loop);
+}
+#ifdef __linux__
+static std::size_t descriptors(){
+    auto* directory=opendir("/proc/self/fd");CHECK(directory);std::size_t n=0;
+    while(auto* e=readdir(directory))if(e->d_name[0]!='.')++n;
+    closedir(directory);return n;
+}
+TEST_CASE("KCP repeated shutdown leaks no descriptors") {
+    Loop loop;auto baseline=descriptors();
+    for(int n=0;n<20;++n){auto e=KcpEndpoint::create(loop,local());CHECK(e);
+        auto s=e->openSession(*SocketAddress::ipv4("127.0.0.1",9),1);CHECK(s);
+        run(loop,closeH(*s));run(loop,closeH(*e));drain(loop);CHECK(descriptors()==baseline);
+    }
+}
+#endif
+
+#ifdef UVCO_TEST_KCP_PENDING_SENDS
+TEST_CASE("KCP Loop-first destruction drains in-flight UDP sends without replacing committed success") {
+    std::unique_ptr<Loop> loop(new Loop);auto a=KcpEndpoint::create(*loop,local()),b=KcpEndpoint::create(*loop,local());CHECK(a&&b);
+    KcpSessionOptions o;o.core=CoreOptions::turbo();
+    auto s=a->openSession(*b->localAddress(),1,o);CHECK(s);auto task=sendOne(*s,KcpMessage(65536,'x'));
+    detail::RunCompletion completion{*loop};detail::co2compat::TaskAccess::start(task,completion.handle(),{});
+    CHECK(s->stats().queuedPackets>0);loop.reset();CHECK(completion.finished);
+    detail::co2compat::TaskAccess::takeResult(task);
+}
+#endif
 UVCO_TEST_MAIN
 #else
 int main(){std::fputs("FAIL: KCP coroutine runtime missing\n",stderr);return 1;}

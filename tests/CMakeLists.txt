@@ -372,3 +372,8 @@ if(UVCO_ENABLE_KCP)
     uvco_configure_test(uvco-kcp-latency-stats-tests)
     add_test(NAME uvco-kcp-latency-stats-tests COMMAND uvco-kcp-latency-stats-tests)
 endif()
+
+if(UVCO_ENABLE_KCP AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT MSVC)
+    target_compile_definitions(uvco-kcp-runtime-tests PRIVATE UVCO_TEST_KCP_PENDING_SENDS=1)
+    target_link_options(uvco-kcp-runtime-tests PRIVATE "-Wl,--wrap=uv_udp_try_send")
+endif()
