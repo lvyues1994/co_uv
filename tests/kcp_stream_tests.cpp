@@ -52,6 +52,27 @@ TEST_CASE("KcpStream bounded leftover and large short writes preserve every byte
     run(loop, closeH(*b));
     drain(loop);
 }
+auto writeOnce(KcpStream &stream)
+    CO2_BEG(co2::Task<Result<std::size_t>>, (stream), char data[1]{'x'}; Result<std::size_t> r{Errc::canceled};) {
+    CO2_AWAIT_SET(r, stream.write(buffer(data)));
+    CO2_RETURN(r);
+}
+CO2_END
+TEST_CASE("KcpStream terminal reason precedes a pre-canceled write") {
+    Loop loop;
+    auto e = KcpEndpoint::create(loop, *SocketAddress::ipv4("127.0.0.1", 0));
+    CHECK(e);
+    auto s = e->openStream(*SocketAddress::ipv4("127.0.0.1", 9), 1);
+    CHECK(s);
+    s->abort(Errc::connection_reset);
+    co2::stop_source stop;
+    stop.request_stop();
+    auto r = run(loop, writeOnce(*s), stop.get_token());
+    CHECK(!r && r.error() == Errc::connection_reset);
+    run(loop, closeH(*s));
+    run(loop, closeH(*e));
+    drain(loop);
+}
 UVCO_TEST_MAIN
 #else
 int main() {

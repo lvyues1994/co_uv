@@ -483,6 +483,15 @@ class KcpSessionBlock final : public HandleBlock {
         drive();
         return true;
     }
+    Result<void> checkSender(co2::stop_token const &token) const noexcept {
+        if (stopping_)
+            return reason_;
+        if (token.stop_requested())
+            return Errc::canceled;
+        if (!send_.idle())
+            return Errc::busy;
+        return {};
+    }
     bool beginSend(co2::coroutine_handle<> waiter, co2::stop_token token, KcpMessage message,
                    Errc &error) {
         if (!reserve(send_, sendCancel_, waiter, token, &cancelSend, error))
@@ -1014,8 +1023,9 @@ class KcpWriteAwaiter {
     }
     template <class P> bool await_suspend(co2::coroutine_handle<P> h) {
         auto token = co2compat::stopTokenOf(h);
-        if (token.stop_requested()) {
-            error_ = Errc::canceled;
+        auto ready = session_->checkSender(token);
+        if (!ready) {
+            error_ = ready.error();
             return false;
         }
         if (buffer_.size && !buffer_.data) {
