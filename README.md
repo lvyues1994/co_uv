@@ -379,18 +379,25 @@ leader 退出后不保留“稍后再 SIGKILL 同一 PGID”的权限。后代�
 
 [MIT License](LICENSE) · [Changelog](CHANGELOG.md) · [验证记录与平台范围](docs/verification.md) · [Review 修订](docs/review2.md)
 
-### KCP（实验性，默认关闭，尚未完成验收）
+### KCP（可选，默认关闭）
 
-`-DUVCO_ENABLE_KCP=ON` 构建可选静态 target `uvco::kcp`；使用者显式链接该 target 并包含
-`<uvco/kcp.hpp>`，安装包支持 `find_package(uvco CONFIG REQUIRED COMPONENTS kcp)`。
-原有 `uvco::uvco` 不自动启用 KCP。
+```sh
+cmake -S . -B build/kcp -DUVCO_ENABLE_KCP=ON
+cmake --build build/kcp
+```
 
-已实现纯 `KcpCore`（注入时间）、`KcpEndpoint::create/openSession/openStream`、
-消息 `KcpSession::sendMessage/recvMessage/drain`、字节流 `KcpStream::write/readSome/drain`，
-以及有界 `acceptPeer` 候选与显式 `openSession(std::move(candidate))`。未知 conv 不自动创建会话。
-`sendMessage` 成功只代表进入本地可靠队列；stream write 可短写，调用者根据返回字节数推进。
-KCP 没有 FIN/握手/认证；关闭是本地操作，非远端 EOF。取消 pending waiter 不撤销已提交消息。
+消费者显式链接 `uvco::kcp`，包含 `<uvco/kcp.hpp>`；已安装包使用
+`find_package(uvco CONFIG REQUIRED COMPONENTS kcp)`。基础 `uvco::uvco` 不自动启用。
 
-**当前阻塞**：原样上游 `IOFFSETOF` 空指针成员取址宏触发 UBSan；不是已批准的 OOM 限制。
-没有屏蔽报告或修改 vendor。Linux KCP CI、benchmark 和完整寿命回归仍待完成，勿视作生产可用。
-见[设计与新审批点](docs/design-kcp.md#14-实现进度与新审批点)、[验证记录](docs/verification.md)。
+`KcpEndpoint::create/openSession/openStream` 复用现有 Udp；消息接口为
+`KcpSession::sendMessage/recvMessage/drain`，字节流为 `KcpStream::write/readSome/drain`。
+`acceptPeer()` 仅返回有界候选，显式 `openSession(std::move(candidate))` 后才创建会话；未知conv不自动创建。
+send成功只代表进入本地可靠队列，stream write可短写；取消等待不撤销已提交数据。
+默认MTU1200、消息上限64KiB（另受127*MSS约束），即时input flush开启，预算/拥塞保护可配置。
+
+KCP没有握手、认证、FIN或对端EOF；先带deadline等待drain再close可尽力发送，但不是远端应用确认。
+原样vendor保留部分OOM不可恢复限制；uvco自有C适配层只把 offsetof 宏改为标准形式，完整sanitizer保持开启。
+原生移植范围和剩余限制见[设计](docs/design-kcp.md#15-后续实现与最终契约)，
+[验证](docs/verification.md)与[loopback/模拟基准](docs/benchmark-kcp.md)。
+
+可选基准：`-DUVCO_BUILD_KCP_BENCHMARK=ON`，运行 `uvco-kcp-latency`；不作为CI性能门禁。

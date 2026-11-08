@@ -16,6 +16,11 @@
 - MIT LICENSE；Result create 工厂与统一格式规则。
 
 ### Changed
+- KCP采用自有C offsetof适配TU，保留vendor哈希，所有sanitizer继续开启。
+- KCP合并每batch显式flush，新增字节高低/硬水位、持续输出拥塞保护和超限消息终止。
+- KcpStream leftover不再误用发送消息上限，write遵守终止错误优先级；拒绝16位wire接收窗溢出。
+- KCP native close经schedule恢复，其他句柄默认策略不变。
+- Linux CI启用KCP，增加KCP包/两TU与pending-lifetime回归、可选loopback/模拟时延基准。
 - pending write 取消默认关闭整个流，等待原生回调后返回 canceled。
 - 部分写入后失败关闭流，禁止把未知偏移当作可安全重试。
 - Work callable 已完成时保留结果，晚到取消不撤销副作用。
@@ -23,7 +28,7 @@
 - noexcept scheduler 使用构造期预分配的显式有界队列。
 
 ### Limitations
-- KCP 仍在验收：上游 IOFFSETOF 空指针成员取址触发 UBSan，尚未豁免；benchmark/KCP CI 与部分寿命/包回归未完成。
+- KCP 原样 vendor 保留部分OOM不可恢复限制；TX串行，缺少握手/认证/FIN，不宣称公网时延优势或未验证平台支持。
 - HE 是 RFC8305 核心子集；process group 不是严格进程树 containment。
 - Windows Job、精确 TTY snapshot guard、完整 RFC6724/NAT64 尚未实现。
 - macOS/Windows/QNX 原生支持仍需目标环境验证。

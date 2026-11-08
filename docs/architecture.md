@@ -955,3 +955,14 @@ ASan 开启 leak 检测，UBSan/TSan halt_on_error；无 sanitizer 报告。含�
 - ExitStatus 字段在 0.1 前统一为 exitStatus/termSignal，无兼容别名。
 - 已加入 MIT/CHANGELOG 与 installed license 回归；格式提交仅四个指定 header + .clang-format，
   非注释 C++ token stream 前后相同。验证历史从 README 移到 verification.md，不依赖临时目录。
+
+### KCP 可选层补充（§7/§9）
+
+默认OFF，`uvco::uvco`仍header-only；显式 `uvco::kcp` 链接原样固定版本vendor的C静态对象，
+通过uvco-owned adapter将IOFFSETOF替换为标准offsetof，原始文件/许可/哈希不变。
+Core无Loop/clock/socket，Session/Endpoint负责native timer、共享Udp泵和有界队列。
+详见 [design-kcp.md §15](design-kcp.md#15-后续实现与最终契约)。
+
+HandleBlock的CloseResumePolicy默认为inlineNative（既有模块不变）；KCP显式选择deferred，
+保证native close通知也经Loop schedule queue。~Loop仍以resident/native anchor保证内部pump排空，
+不持有跨析构的外部KeepAlive。KCP的busy返回与既有流并发契约不同，是新API的显式单waiter规则。

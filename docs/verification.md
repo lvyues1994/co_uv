@@ -49,13 +49,29 @@ TSAN_OPTIONS=halt_on_error=1。日志可作为 CI artifact 保存，不依赖开
 没有修改本地 sysctl，也没有关闭 sanitizer 或过滤报告来换取通过。
 真实 NSS、网络 FS、终端与信号 disposition 有系统语义差异；测试不构成硬实时保证。
 
-## KCP 实验实现：未完成验收
+## KCP 后续实现验证
 
-新增测试均先确认RED：vendor缺失、Core缺失、runtime缺失、stream缺失、accept缺失；
-endpoint会话上限另有实际断言RED→GREEN。纯核覆盖模拟时钟/可重复丢包乱序、回绕、片数与整包预检、空消息、stream、dead_link。
-已跑真实UDP消息回环、stream小buffer余量与短写、取消、close后awaiter引用、有界候选/显式接入。
+2026-11-08（Asia/Shanghai），代码至a7c7131；Linux x86_64，g++13.3、clang++18.1。
 
-四构建编译成功；g++/clang++/TSan 首次全套及随后每项连续3次重复均68/68，ASan+UBSan 64/68。
-ASan+UBSan四项KCP失败统一定位到原样vendor的IOFFSETOF空指针成员取址宏；未屏蔽、未修改。
-因此不能声称四构建全绿或KCP已验收，不能用本记录代替尚未补齐的关闭/并发/包/基准验证。
-详见[设计的新审批点](design-kcp.md#14-实现进度与新审批点)。未运行性能benchmark。
+| 构建 | 结果 |
+|---|---|
+| g++ Debug | 72/72；每项连续重复3次 |
+| clang++ Debug | 72/72；每项连续重复3次 |
+| ASan+UBSan / leak | 72/72；每项连续重复3次；C/C++均完整instrument |
+| TSan | 72/72；每项连续重复3次；C/C++均完整instrument |
+
+无sanitizer suppression，无禁用vendor检查；原始c/h/LICENSE的固定SHA256通过。
+新增实际RED→GREEN包括offsetof UB、超限消息queue-head、重复显式flush、字节水位取消、
+stream接收limit混用、compiled包架构误标，以及native close内联恢复、16位接收窗溢出和stream终止错误优先级。保护器、分位数与此前模块创建也先确认缺失RED。
+已正确的寿命/accept路径新增覆盖后直接通过，没有把这些用例虚称为原有失败。
+
+覆盖 pending接收close、busy/done未take、真实saved awaiter、Loop-first内部pump与在途send、
+提交后结果冻结、发送前取消/字节背压、共享conv隔离、重复fd计数、候选TTL/错误endpoint/重放/取消/关闭/限额。
+Linux寿命fixture强制UDP走native异步请求，避免try_send成功掩盖在途路径；其他平台未宣称已运行该fixture。
+
+KCP installed/relocated、add_subdirectory、FetchContent消费者各为两个TU，随四构建重复；
+另验证OFF安装包拒绝required kcp component。CI actionlint通过；Linux所有矩阵启用KCP并传递C/C++ sanitizer flags。
+GitHub远端CI本轮未运行（未push），不能把本地结果说成GitHub Actions已成功。
+
+Release基准已运行，结果与局限见 [benchmark-kcp.md](benchmark-kcp.md)。
+部分vendor OOM不可恢复、串行TX以及未验证平台仍是已知限制，不等同于测试失败。

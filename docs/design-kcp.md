@@ -65,7 +65,7 @@ UdpEndpoint ─ 一个 recv pump / 有限 TX jobs / map[(peer,conv)]
 接口草图（**拟议新 API**，不是已存在/可编译承诺）：
 
 ```cpp
-using KcpMessage = std::vector<std::uint8_t>;
+using KcpMessage = std::vector<char>;
 struct KcpOutputSink {
     void* context;
     bool (*tryCopy)(void*, ConstBuffer) noexcept; // 只能复制到有界队列
@@ -81,7 +81,8 @@ public:
     Result<std::size_t> peekMessageSize() const; // 不完整 -> again
     Result<KcpMessage> recvMessage();            // 一条完整消息；空消息不是 EOF
     std::size_t waitingSegments() const;         // snd_queue + snd_buf，非字节
-    CoreStats stats() const;                     // 含 dead_link / state / output drops
+    bool deadLink() const;
+    std::uint64_t outputDrops() const;
 };
 ```
 
@@ -273,9 +274,9 @@ CO2_AWAIT_SET(candidate, endpoint.acceptPeer());
 
 ## 9. 构建、安装与依赖
 
-建议 `UVCO_ENABLE_KCP=OFF`（待§12确认），不默认引入 C 对象或改变现有 header-only 基础 target。
+已确认 `UVCO_ENABLE_KCP=OFF`，不默认引入 C 对象或改变现有 header-only 基础 target。
 开启时构建原始 ikcp.c 的静态 C target，C++ wrapper/Session 作为可选 `uvco::kcp` target，链接基础 `uvco::uvco`；
-vendor C target 不依赖 libuv。KcpCore 为复用 Result/Errc 可包含现有错误类型头，但不能引入 Loop/I/O 或 runtime 时钟依赖。
+vendor C 源码不调用 libuv；当前合并的 uvco::kcp target 通过基础 uvco::uvco 传递既有依赖，暂不另导出独立无libuv的Core包。KcpCore 为复用 Result/Errc 可包含现有错误类型头，但不能引入 Loop/I/O 或 runtime 时钟依赖。
 不为“纯核”另外复制一套 Result；纯核测试不创建 Loop/UDP/timer，并用 syscall/依赖审计验证隔离。
 
 vendor 原文与上游 LICENSE 一起保存，版本文件记录 commit/来源/文件 SHA256；实现时核对本 pin 的原始 notice。
@@ -342,7 +343,7 @@ goodput、线上总字节/重传/ACK占比、CPU、RSS、队列峰值/丢弃、t
 KcpStream 在创建 Core 时设 stream 模式，之后不允许切换；公共工厂只返回一种 facade。
 不暴露 recvMessage/sendMessage，不把一次 write 映射成远端消息边界。
 拟议 write(ConstBuffer)、readSome(MutableBuffer)、drain()/close() 与现有流命名对齐；
-write 成功表示整份输入进入本地可靠队列，不表示对端消费。单 pending writer/reader，第二个返回 busy。
+write 成功返回已进入本地可靠队列的字节数（可短写），不表示整份输入已接纳或对端消费。单 pending writer/reader，第二个返回 busy。
 write 在进入 KCP 前复制并检查预算；KCP可能短接受，已接受前缀不可回滚，
 不把失败后的整段输入再提交。发送前取消保证零提交；发生部分提交后的取消仅取消等待，不撤销前缀，
 API必须保留已接受字节数（Result<size_t> 成功可为短写），与消息模式的整条 admission 分开。
@@ -372,7 +373,7 @@ F. Release RTT/最大延迟/资源/公平性基准；只有证据支持才做共
 - [ikcp.c](https://github.com/skywind3000/kcp/blob/b1a7a2101dcbb96017681a500d6b82bbe5a88766/ikcp.c)
 - [现有架构](architecture.md)、[统一 watcher 设计](design-watchers.md)、[验证方法](verification.md)
 
-## 14. 实现进度与新审批点
+## 14. 首轮实现进度与审批记录（历史，已由§15更新）
 
 已分步提交默认 OFF 的 vendor/target、纯核、Session、独立 Stream、共享 endpoint 与 pull accept。
 当前真实类型仍为 `Udp`；Session 使用相同 TimerBackend 的真实 one-shot timer anchor。
@@ -403,10 +404,46 @@ IOFFSETOF(TYPE, MEMBER) ((size_t) &((TYPE *)0)->MEMBER) // ikcp.h:154
 原始 vendor 文件仍逐字节不变，ASan/UBSan继续检测全部代码；这改变有效宏定义，故不擅自当作“原样编译”。
 另一选择是审批最小上游补丁或其他版本；不建议通过关闭 null sanitizer 绕过。
 
-依据“超出已批准语义先停下报告”的要求，当前停止后续实现，等待此编译策略确认。
+当时依据“超出已批准语义先停下报告”的要求暂停；§14.1记录批准，最新实现状态见§15。
 
 ### 14.1 编译适配已获批准
 
 2026-11-08（Asia/Shanghai）用户批准 `src/kcp_adapter.c`：包含原始头文件，
 将 IOFFSETOF 重定义为标准 offsetof，再包含原始 C 文件。仅改变该 TU 的有效宏，
 vendor 文件/版本/SHA256 全部不变；不关闭任何 sanitizer。原§14审批阻塞已解除。
+
+## 15. 后续实现与最终契约
+
+- `src/kcp_adapter.c` 按批准方式适配标准 offsetof，vendor c/h/LICENSE 与固定 SHA256 未变。
+  C/C++ 都完整开启相应 sanitizer，没有 vendor 例外/suppression。
+- driver 收集 input ACK、send admission、recv释放窗口的 flush 请求；退出 Core 调用后每个驱动 batch
+  **最多一次显式 flush**。`update` 自身仍可按 KCP 时间表 flush；没有把这个次数伪装成所有 native flush 的次数。
+  `KcpSession/KcpStream::stats()` 提供 inputBatches/admissions/explicitFlushes/maxExplicitFlushesPerDrive、
+  outputDrops、queuedPackets、waitingSegments，均在绑定 Loop 线程读取。
+- 段水位默认 high256/low128/hard512；保守字节水位 high512KiB/low256KiB/hard1MiB，
+  `KcpSessionOptions::{byteHighWater,byteLowWater,byteHardLimit}` 可调。按段数×MTU估算发送占用，
+  不是整个进程RSS/接收buffer/共享pool的总上限；工厂验证至少容纳一条最大消息，避免永远无法 admission。
+- output满则整包丢新、可靠段留待重传。`congestionDurationMs=2000` 与 `congestionDropLimit=1024`
+  **同时满足**才以 ENOBUFS 终止持续本地拥塞；一旦队列有空间即重置观察窗。纯保护器使用注入时间测试。
+- 过大消息输入终止 Session 并保留 EMSGSIZE 原因，不让无法取走的 queue head 永久卡住。
+  stream接收单元与消息 admission 上限分开；leftover最多一个 native单元（受MTU约束），不是消息队列。
+- 用户挂起的 send/recv/read/drain/accept 完成经 schedule queue；KCP Session/Endpoint 的 **native close
+  完成也延后**。HandleBlock增加 opt-in CloseResumePolicy，其他模块默认 inlineNative 完全不变。
+  预取消/槽冲突/已关闭等同步拒绝仍可在 await_suspend 返回 false，空/已关闭 close 同样可立即完成。
+- Linux lifetime测试强制 uv_udp_try_send 返回 EAGAIN，覆盖真正 native请求在途时 ~Loop 先销毁、
+  本地已提交 send 成功不被后续关闭改写；另覆盖 done未take、关闭pending、共享conv隔离和重复fd计数。
+- accept覆盖过期、错误endpoint、已使用提案重放、取消/关闭/busy，以及独立全局/每peer候选上限。
+- KCP包验证 installed+relocated/add_subdirectory/FetchContent 与两TU链接；OFF包拒绝 required kcp。
+  header-only OFF版本保留架构无关，含静态C对象的ON包检查架构。上游MIT独立安装并校验SHA256。
+- Linux CI所有现有矩阵启用KCP（含fetched-deps），同时传 CMAKE_C_FLAGS / CMAKE_CXX_FLAGS 的sanitizer flags。
+  benchmark独立开关、不进CI时延门禁；macOS/Windows仍属原有非阻塞范围，KCP原生移植不额外宣称通过。
+
+### 15.1 仍保守保留的设计选择
+
+endpoint TX目前公平轮转会话、单 native send（可同步 fast-path），未扩成32路请求并发；
+这是有界预算内的首版实现，不改变发送完成/可靠性语义。规模化共享timer heap、FEC/加密/握手/FIN、
+路径迁移与公网安全接入仍不属于当前实现。部分vendor OOM不可恢复的已批准限制继续存在。
+本机loopback结果不能证明公网30–40%或3x优势；复现命令和数字见 [KCP基准](benchmark-kcp.md)。
+
+接收窗口参数限定128..65535，避免16位wire窗口通告溢出为零；stream write在复制用户buffer前
+先检查sticky terminal、预取消和busy，保持与消息接口相同的同步拒绝优先级。
