@@ -11,6 +11,8 @@ if(CMAKE_VERSION VERSION_LESS 3.21)
         set(PROJECT_IS_TOP_LEVEL ON)
     endif()
 endif()
+option(UVCO_ENABLE_KCP "Build optional pinned KCP support" OFF)
+option(UVCO_BUILD_KCP_BENCHMARK "Build the optional KCP/TCP benchmark" OFF)
 option(UVCO_BUILD_TESTS "Build uvco tests" ${PROJECT_IS_TOP_LEVEL})
 option(UVCO_ENABLE_INSTALL "Install/export uvco (installed deps required)" ${PROJECT_IS_TOP_LEVEL})
 include(cmake/uvcoDependencies.cmake)
@@ -97,11 +99,32 @@ target_link_libraries(uvco INTERFACE
     $<BUILD_INTERFACE:${UVCO_LIBUV_TARGET}>
     $<INSTALL_INTERFACE:uvco::dependencies>)
 
+if(UVCO_ENABLE_KCP)
+    add_library(uvco_kcp STATIC third_party/kcp/ikcp.c)
+    add_library(uvco::kcp ALIAS uvco_kcp)
+    set_target_properties(uvco_kcp PROPERTIES EXPORT_NAME kcp POSITION_INDEPENDENT_CODE ON)
+    target_link_libraries(uvco_kcp PUBLIC uvco::uvco)
+    target_compile_definitions(uvco_kcp PUBLIC UVCO_HAS_KCP=1)
+    target_include_directories(uvco_kcp PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/kcp>
+        )
+endif()
+
 if(UVCO_ENABLE_INSTALL)
     include(GNUInstallDirs)
     include(CMakePackageConfigHelpers)
     target_include_directories(uvco INTERFACE $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
     set(_uvco_package_dir "${CMAKE_INSTALL_LIBDIR}/cmake/uvco")
+    if(UVCO_ENABLE_KCP)
+        target_include_directories(uvco_kcp PUBLIC
+            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/uvco/detail/kcp>)
+        install(TARGETS uvco_kcp EXPORT uvcoTargets
+            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT uvco)
+        install(FILES third_party/kcp/ikcp.h
+            DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/uvco/detail/kcp COMPONENT uvco)
+        install(FILES third_party/kcp/LICENSE third_party/kcp/VERSION.md
+            DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/uvco/kcp COMPONENT uvco)
+    endif()
     install(TARGETS uvco EXPORT uvcoTargets COMPONENT uvco)
     install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} COMPONENT uvco)
     install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/uvco COMPONENT uvco)

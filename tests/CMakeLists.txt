@@ -309,3 +309,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
  target_link_options(uvco-write-partial-fault-tests PRIVATE "-Wl,--wrap=uv_try_write" "-Wl,--wrap=uv_write")
  add_test(NAME uvco-write-partial-fault-tests COMMAND uvco-write-partial-fault-tests)
 endif()
+
+if(UVCO_ENABLE_KCP)
+    add_test(NAME uvco-kcp-vendor-tests COMMAND ${CMAKE_COMMAND}
+        -DSOURCE=${PROJECT_SOURCE_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/kcp_vendor_tests.cmake)
+endif()
