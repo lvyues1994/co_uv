@@ -1,4 +1,6 @@
 #pragma once
+#include <algorithm>
+#include "uvco/detail/string_read_tail.hpp"
 #include <array>
 #include <csignal>
 #include <exception>
@@ -54,13 +56,15 @@ inline auto captureInput(CaptureState& s) CO2_BEG(co2::Task<Result<void>>,(s),Re
     CO2_RETURN(r);
 } CO2_END
 inline auto captureOutput(CaptureState& s,Pipe& pipe,std::size_t cap)
- CO2_BEG(co2::Task<Result<std::string>>,(s,pipe,cap),std::array<char,4096> bytes{};std::string data;Result<std::size_t> n;co2::stop_token token;) {
+ CO2_BEG(co2::Task<Result<std::string>>,(s,pipe,cap),char overflow=0;std::string data;detail::StringReadTail tail;MutableBuffer bytes;Result<std::size_t> n;co2::stop_token token;) {
     CO2_AWAIT_SET(token,co2::getStopToken());
     while(pipe.isOpen() && !token.stop_requested()) {
-        CO2_AWAIT_SET(n,pipe.read(buffer(bytes.data(),bytes.size())));
-        if(!n){if(n.error()==Errc::eof)break;if(token.stop_requested())CO2_RETURN(Result<std::string>{Errc::canceled});CO2_RETURN(Result<std::string>{n.error()});}
-        if(*n>cap-data.size())CO2_RETURN(Result<std::string>{static_cast<Errc>(UV_ENOBUFS)});
-        data.append(bytes.data(),*n);
+        if(data.size()<cap) bytes=tail.prepare(data,(std::min)(std::size_t{4096},cap-data.size()));
+        else bytes=buffer(&overflow,1); // probe EOF/overflow without exceeding the output cap
+        CO2_AWAIT_SET(n,pipe.read(bytes));
+        if(!n){tail.rollback();if(n.error()==Errc::eof)break;if(token.stop_requested())CO2_RETURN(Result<std::string>{Errc::canceled});CO2_RETURN(Result<std::string>{n.error()});}
+        if(bytes.data==&overflow){if(*n!=0)CO2_RETURN(Result<std::string>{static_cast<Errc>(UV_ENOBUFS)});}
+        else tail.commit(*n);
     }
     if(token.stop_requested())CO2_RETURN(Result<std::string>{Errc::canceled});
     CO2_RETURN(Result<std::string>{std::move(data)});

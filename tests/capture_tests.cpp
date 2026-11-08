@@ -34,4 +34,12 @@ TEST_CASE("capture stderr cap is independent of stdout cap"){
  uvco::Loop loop;uvco::CaptureOptions io;io.stderrLimit=4;
  auto r=uvco::run(loop,uvco::capture(loop,command("duplex"),std::move(io)));CHECK(!r);CHECK(r.error()==static_cast<uvco::Errc>(UV_ENOBUFS));loop.runUntilIdle();
 }
+TEST_CASE("capture direct-tail caps preserve exact limit and zero-cap EOF") {
+ for(auto cap:{std::size_t{0},std::size_t{4096}}){
+  uvco::Loop loop;uvco::CaptureOptions io;io.stdoutLimit=cap;io.stderrLimit=0;
+  auto p=cap==0?command("exit","0"):command("echo",std::string(4095,'x'));
+  auto r=uvco::run(loop,uvco::capture(loop,std::move(p),std::move(io)));CHECK(r);CHECK(r->stdoutData.size()==cap);
+ }
+ {uvco::Loop loop;uvco::CaptureOptions io;io.stdoutLimit=0;auto r=uvco::run(loop,uvco::capture(loop,command("echo",""),std::move(io)));CHECK(!r);CHECK(r.error()==static_cast<uvco::Errc>(UV_ENOBUFS));}
+}
 UVCO_TEST_MAIN

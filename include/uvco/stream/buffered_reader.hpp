@@ -1,5 +1,5 @@
 #pragma once
-#include <array>
+#include "uvco/detail/string_read_tail.hpp"
 #include <string>
 #include <co2/co2.hpp>
 #include "uvco/core/result.hpp"
@@ -61,20 +61,21 @@ template<class Stream> class BufferedReader {
   public:
     std::size_t bufferedBytes() const noexcept{return available();}
   private:
-    std::size_t available() const noexcept{return data_.size()-offset_;}
+    std::size_t available() const noexcept{return data_.size()-offset_-pendingTail_;}
     Result<std::string> take(std::size_t n,std::size_t delimiter){
         std::string result{data_.data()+offset_,n};offset_+=n+delimiter;
         if(offset_==data_.size()){data_.clear();offset_=0;}
         return result;
     }
     auto fill(){return fillTask(*this);}
-    static auto fillTask(BufferedReader& self) CO2_BEG(co2::Task<Result<void>>,(self),std::array<char,4096> bytes{};Result<std::size_t> n;) {
+    static auto fillTask(BufferedReader& self) CO2_BEG(co2::Task<Result<void>>,(self),detail::StringReadTail tail;MutableBuffer bytes;Result<std::size_t> n;) {
         if(self.offset_){self.data_.erase(0,self.offset_);self.offset_=0;}
-        CO2_AWAIT_SET(n,self.stream_->read(buffer(bytes.data(),bytes.size())));
-        if(!n){if(n.error()==Errc::eof){self.eof_=true;CO2_RETURN(Result<void>{});}CO2_RETURN(Result<void>{n.error()});}
-        if(*n==0)self.eof_=true;else self.data_.append(bytes.data(),*n);
+        bytes=tail.prepare(self.data_,4096,&self.pendingTail_);
+        CO2_AWAIT_SET(n,self.stream_->read(bytes));
+        if(!n){tail.rollback();if(n.error()==Errc::eof){self.eof_=true;CO2_RETURN(Result<void>{});}CO2_RETURN(Result<void>{n.error()});}
+        tail.commit(*n);if(*n==0)self.eof_=true;
         CO2_RETURN(Result<void>{});
     } CO2_END
-    Stream* stream_;std::string data_;std::size_t offset_=0;bool eof_=false,busy_=false;
+    Stream* stream_;std::string data_;std::size_t offset_=0,pendingTail_=0;bool eof_=false,busy_=false;
 };
 } // namespace uvco

@@ -157,7 +157,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     unset(_uvco_new_symbol)
 endif()
 
-# The output-string fault fixture wraps a libstdc++ C++11-ABI append symbol.
+# The output-string fault fixture wraps a libstdc++ C++11-ABI resize symbol.
 # Only this fixture is ABI-specific; ordinary capture tests remain portable.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     check_cxx_source_compiles("#include <string>
@@ -168,7 +168,7 @@ int main() {}" UVCO_TEST_GLIBCXX_ABI)
     if(UVCO_TEST_GLIBCXX_ABI)
         add_executable(uvco-capture-fault-tests capture_fault_tests.cpp)
         uvco_configure_test(uvco-capture-fault-tests)
-        # Preserve the intercepted append boundary even in Release builds.
+        # Preserve the intercepted resize boundary even in Release builds.
         target_compile_options(uvco-capture-fault-tests PRIVATE -fno-inline)
         add_dependencies(uvco-capture-fault-tests uvco-process-helper)
         if(CMAKE_SIZEOF_VOID_P EQUAL 8)
@@ -176,12 +176,26 @@ int main() {}" UVCO_TEST_GLIBCXX_ABI)
         else()
             set(_uvco_append_symbol _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE6appendEPKcj)
         endif()
+        if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+            set(_uvco_resize_symbol _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE6resizeEm)
+        else()
+            set(_uvco_resize_symbol _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE6resizeEj)
+        endif()
         target_compile_definitions(uvco-capture-fault-tests PRIVATE
             UVCO_TEST_PROCESS_HELPER="$<TARGET_FILE:uvco-process-helper>"
-            UVCO_TEST_APPEND_SYMBOL="${_uvco_append_symbol}")
-        target_link_options(uvco-capture-fault-tests PRIVATE "-Wl,--wrap=uv_read_start" "-Wl,--wrap=${_uvco_append_symbol}")
+            UVCO_TEST_RESIZE_SYMBOL="${_uvco_resize_symbol}")
+        target_link_options(uvco-capture-fault-tests PRIVATE "-Wl,--wrap=uv_read_start" "-Wl,--wrap=${_uvco_resize_symbol}")
         add_test(NAME uvco-capture-fault-tests COMMAND uvco-capture-fault-tests)
         set_tests_properties(uvco-capture-fault-tests PROPERTIES TIMEOUT 30)
+        add_executable(uvco-read-copy-tests read_copy_tests.cpp)
+        uvco_configure_test(uvco-read-copy-tests)
+        target_compile_options(uvco-read-copy-tests PRIVATE -fno-inline)
+        add_dependencies(uvco-read-copy-tests uvco-process-helper)
+        target_compile_definitions(uvco-read-copy-tests PRIVATE
+            UVCO_TEST_PROCESS_HELPER="$<TARGET_FILE:uvco-process-helper>"
+            UVCO_TEST_APPEND_SYMBOL="${_uvco_append_symbol}")
+        target_link_options(uvco-read-copy-tests PRIVATE "-Wl,--wrap=${_uvco_append_symbol}")
+        add_test(NAME uvco-read-copy-tests COMMAND uvco-read-copy-tests)
         unset(_uvco_append_symbol)
     endif()
 endif()
