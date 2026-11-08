@@ -406,3 +406,22 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT MSVC)
     target_link_options(uvco-write-allocation-tests PRIVATE "-Wl,--wrap=uv_try_write")
     add_test(NAME uvco-write-allocation-tests COMMAND uvco-write-allocation-tests)
 endif()
+
+# GNU link-wrap counts calls without replacing ASan/TSan allocation interceptors.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT MSVC)
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        set(_uvco_count_new _Znwm)
+        set(_uvco_count_array _Znam)
+    else()
+        set(_uvco_count_new _Znwj)
+        set(_uvco_count_array _Znaj)
+    endif()
+    foreach(t uvco-work-allocation-tests uvco-write-allocation-tests)
+        target_compile_definitions(${t} PRIVATE UVCO_TEST_WRAP_NEW=1
+            UVCO_TEST_NEW_SYMBOL="${_uvco_count_new}"
+            UVCO_TEST_NEW_ARRAY_SYMBOL="${_uvco_count_array}")
+        target_link_options(${t} PRIVATE "-Wl,--wrap=${_uvco_count_new}" "-Wl,--wrap=${_uvco_count_array}")
+    endforeach()
+    unset(_uvco_count_new)
+    unset(_uvco_count_array)
+endif()
