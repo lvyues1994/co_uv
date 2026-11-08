@@ -358,12 +358,12 @@ class WriteAwaiter {
             return false;
         }
         bool const pending = start(waiting);
-        if (pending) cancel_.arm(block_->loop(), ::uvco::detail::co2compat::stopTokenOf(waiting), &WriteAwaiter::onCancel, this);
+        if (pending) req_->cancel.arm(block_->loop(), ::uvco::detail::co2compat::stopTokenOf(waiting), &WriteAwaiter::onCancel, this);
         return pending;
     }
 
     Result<void> await_resume() noexcept {
-        cancel_.disarm();
+        if (req_) req_->cancel.disarm();
         int const status = status_;
         delete std::exchange(req_, nullptr);
         if (std::exchange(started_, false)) block_->endOp(); // 最后访问控制块
@@ -376,6 +376,7 @@ class WriteAwaiter {
         co2::coroutine_handle<> waiter;
         WriteAwaiter* self;
         bool pending;
+        CancelHook cancel;
     };
 
     static constexpr std::size_t inlineBufs = 8;
@@ -469,7 +470,6 @@ class WriteAwaiter {
     bool single_;
     bool started_ = false;
     bool canceled_ = false;
-    CancelHook cancel_;
 };
 
 // shutdown / connect：基于 ReqAwaiter（请求体在 awaiter 里，帧局部或 co2 槽）。
