@@ -58,6 +58,59 @@ TEST_CASE("KCP endpoint session limit is hard and recoverable") {
     auto second=e->openSession(peer,2);CHECK(!second&&second.error()==Errc::busy);
     run(loop,closeH(*first));run(loop,closeH(*e));drain(loop);
 }
+
+auto waitSaved(detail::KcpReceiveAwaiter a) CO2_BEG(co2::Task<Result<KcpMessage>>,(a),Result<KcpMessage> r{Errc::canceled};) {
+    CO2_AWAIT_SET(r,a);CO2_RETURN(std::move(r));
+} CO2_END
+auto closeLater(Loop& loop,KcpSession& s) CO2_BEG(co2::Task<>,(loop,s),Result<void> r;) {
+    CO2_AWAIT_SET(r,sleep(loop,10ms));CHECK(r);
+    CO2_AWAIT(s.close());CO2_RETURN();
+} CO2_END
+auto record(KcpSession& s,std::vector<Errc>& errors) CO2_BEG(co2::Task<>,(s,errors),Result<KcpMessage> r{Errc::canceled};) {
+    CO2_AWAIT_SET(r,s.recvMessage());CHECK(!r);errors.push_back(r.error());CO2_RETURN();
+} CO2_END
+auto closePending(Loop& loop,KcpSession& s,std::vector<Errc>& errors) CO2_BEG(co2::Task<>,(loop,s,errors)) {
+    CO2_AWAIT(co2::whenAll(record(s,errors),closeLater(loop,s)));CO2_RETURN();
+} CO2_END
+auto conflict(KcpSession& s,std::vector<Errc>& errors) CO2_BEG(co2::Task<>,(s,errors)) {
+    CO2_AWAIT(co2::whenAll(record(s,errors),record(s,errors)));CO2_RETURN();
+} CO2_END
+auto timedConflict(Loop& loop,KcpSession& s,std::vector<Errc>& errors) CO2_BEG(co2::Task<>,(loop,s,errors)) {
+    CO2_AWAIT(timeout(loop,20ms,conflict(s,errors)));CO2_RETURN();
+} CO2_END
+TEST_CASE("KCP pending close and concurrent receiver are recoverable") {
+    Loop loop;auto e=KcpEndpoint::create(loop,local());CHECK(e);auto s=e->openSession(*SocketAddress::ipv4("127.0.0.1",9),1);CHECK(s);
+    std::vector<Errc> errors;run(loop,timedConflict(loop,*s,errors));
+    CHECK(errors.size()==2&&errors[0]==Errc::busy&&errors[1]==Errc::canceled);
+    errors.clear();run(loop,closePending(loop,*s,errors));CHECK(errors.size()==1&&errors[0]==Errc::aborted);
+    run(loop,closeH(*e));drain(loop);
+}
+TEST_CASE("KCP retained awaiter actually resumes after owner close") {
+    Loop loop;auto e=KcpEndpoint::create(loop,local());CHECK(e);auto s=e->openSession(*SocketAddress::ipv4("127.0.0.1",9),1);CHECK(s);
+    auto saved=s->recvMessage();run(loop,closeH(*s));auto r=run(loop,waitSaved(std::move(saved)));CHECK(!r&&r.error()==Errc::aborted);
+    run(loop,closeH(*e));drain(loop);
+}
+TEST_CASE("KCP Loop-first destruction drains internal pumps and pending receiver") {
+    std::unique_ptr<Loop> loop(new Loop);auto e=KcpEndpoint::create(*loop,local());CHECK(e);
+    auto s=e->openSession(*SocketAddress::ipv4("127.0.0.1",9),1);CHECK(s);
+    auto task=receiveOne(*s);detail::RunCompletion completion{*loop};
+    detail::co2compat::TaskAccess::start(task,completion.handle(),{});
+    loop.reset();CHECK(completion.finished);
+    auto r=detail::co2compat::TaskAccess::takeResult(task);CHECK(!r&&r.error()==Errc::aborted);
+}
+auto oversizedReceiver(KcpSession& s) CO2_BEG(co2::Task<>,(s),Result<KcpMessage> r{Errc::canceled};Result<void> d;) {
+    CO2_AWAIT_SET(r,s.recvMessage());CHECK(!r&&r.error()==static_cast<Errc>(UV_EMSGSIZE));
+    CO2_AWAIT_SET(d,s.drain());CHECK(!d&&d.error()==static_cast<Errc>(UV_EMSGSIZE));CO2_RETURN();
+} CO2_END
+auto oversizedBoth(KcpSession& a,KcpSession& b) CO2_BEG(co2::Task<>,(a,b)) {
+    CO2_AWAIT(co2::whenAll(sendOne(a,KcpMessage{'a','b'}),oversizedReceiver(b)));CO2_RETURN();
+} CO2_END
+TEST_CASE("KCP oversized receive terminally stops rather than wedging the queue head") {
+    Loop loop;auto a=KcpEndpoint::create(loop,local()),b=KcpEndpoint::create(loop,local());CHECK(a&&b);
+    KcpSessionOptions o;o.core.messageLimit=1;
+    auto sa=a->openSession(*b->localAddress(),1),sb=b->openSession(*a->localAddress(),1,o);CHECK(sa&&sb);
+    run(loop,oversizedBoth(*sa,*sb));run(loop,closeH(*sa));run(loop,closeH(*sb));run(loop,closeH(*a));run(loop,closeH(*b));drain(loop);
+}
 UVCO_TEST_MAIN
 #else
 int main(){std::fputs("FAIL: KCP coroutine runtime missing\n",stderr);return 1;}

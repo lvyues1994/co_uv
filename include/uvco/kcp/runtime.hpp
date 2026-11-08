@@ -289,6 +289,10 @@ class KcpSessionBlock final : public HandleBlock {
             if(!r){stop(r.error());return;}
             if(options_.immediateFlushAfterInput){core_->flush();flushed=true;}
         }
+        auto messageSize=core_->peekMessageSize();
+        if(!core_->streamMode()&&messageSize&&*messageSize>core_->messageLimit()) {
+            stop(static_cast<Errc>(UV_EMSGSIZE));return;
+        }
         fulfillReceive();
         fulfillRead();
         admitSender();
