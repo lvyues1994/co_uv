@@ -6,11 +6,28 @@
 #include "uvco/udp.hpp"
 #include "uvco/timer.hpp"
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <memory>
 #include <vector>
 
 namespace uvco {
+namespace detail {class KcpEndpointBlock;}
+struct KcpIncoming {
+    SocketAddress peer;
+    std::uint32_t conv=0;
+    KcpMessage firstPacket;
+    KcpIncoming()=default;
+    KcpIncoming(KcpIncoming&&) noexcept=default;
+    KcpIncoming& operator=(KcpIncoming&&) noexcept=default;
+    KcpIncoming(KcpIncoming const&)=delete;
+    KcpIncoming& operator=(KcpIncoming const&)=delete;
+  private:
+    friend class detail::KcpEndpointBlock;
+    friend class KcpEndpoint;
+    std::uint64_t endpointId_=0,expires_=0;
+    bool used_=false;
+};
 struct KcpSessionOptions {
     CoreOptions core;
     bool immediateFlushAfterInput = true;
@@ -19,6 +36,9 @@ struct KcpSessionOptions {
 };
 struct KcpEndpointOptions {
     std::size_t mtu = 1200, packetLimit = 2048, sessionLimit = 256;
+    bool accept=false;
+    std::size_t candidateLimit=16,perPeerCandidates=4,candidatesPerSecond=100;
+    std::uint64_t candidateTtlMs=5000;
 };
 class KcpSession;
 namespace detail {
@@ -49,6 +69,15 @@ class KcpEndpointBlock final : public HandleBlock {
         bool queued=false;
         explicit Packet(std::size_t mtu):data(mtu){}
     };
+    struct Candidate {
+        SocketAddress peer;
+        std::uint32_t conv=0;
+        std::uint64_t expires=0;
+        std::size_t length=0;
+        std::vector<char> data;
+        bool active=false;
+        explicit Candidate(std::size_t mtu):data(mtu){}
+    };
     struct Completion {
         co2compat::FrameHeader header{&co2compat::noopDestroy,&step,false,false};
         KcpEndpointBlock* owner=nullptr;
@@ -70,6 +99,10 @@ class KcpEndpointBlock final : public HandleBlock {
     };
     KcpEndpointBlock(Loop& loop,Udp udp,KcpEndpointOptions options)
         :HandleBlock{loop},udp_{std::move(udp)},options_{options},receiveBuffer_(65507) {
+        static std::atomic<std::uint64_t> ids{1};
+        id_=ids.fetch_add(1,std::memory_order_relaxed);
+        candidates_.reserve(options.candidateLimit);
+        for(std::size_t i=0;i<options.candidateLimit;++i)candidates_.emplace_back(options.mtu);
         sessions_.reserve(options.sessionLimit);
         packets_.reserve(options.packetLimit);
         for(std::size_t i=0;i<options.packetLimit;++i)packets_.emplace_back(options.mtu);
@@ -90,6 +123,25 @@ class KcpEndpointBlock final : public HandleBlock {
     KcpEndpointOptions const& options() const noexcept {return options_;}
     bool stopping() const noexcept {return stopping_;}
     bool hasCapacity() const noexcept {return sessions_.size()<options_.sessionLimit;}
+    std::uint64_t id() const noexcept{return id_;}
+    std::size_t sessionCount() const noexcept{return sessions_.size();}
+    std::size_t candidateCount() noexcept {
+        auto now=kcpNow();std::size_t count=0;
+        for(auto& c:candidates_){if(c.active&&c.expires<now)c.active=false;if(c.active)++count;}
+        return count;
+    }
+    bool beginAccept(co2::coroutine_handle<> waiter,co2::stop_token token,Errc& error) {
+        if(stopping_){error=Errc::aborted;return false;}
+        if(!options_.accept){error=Errc::not_supported;return false;}
+        if(token.stop_requested()){error=Errc::canceled;return false;}
+        if(!accept_.idle()){error=Errc::busy;return false;}
+        accept_.begin();accept_.pend(waiter);opBegin();acceptToken_=token;
+        acceptCancel_.arm(loop(),std::move(token),&cancelAccept,this);
+        deliverCandidate();return true;
+    }
+    Result<KcpIncoming> takeAccept() noexcept {
+        acceptCancel_.disarm();auto taken=accept_.take();opEnd();return std::move(taken.result);
+    }
     KcpSessionBlock* find(SocketAddress const&,std::uint32_t) noexcept;
     void add(KcpSessionBlock&);
     void remove(KcpSessionBlock&) noexcept;
@@ -124,6 +176,42 @@ class KcpEndpointBlock final : public HandleBlock {
         CO2_RETURN();
     } CO2_END
     void route(Datagram const&) noexcept;
+    void offerCandidate(SocketAddress const& peer,ConstBuffer data) noexcept {
+        if(!options_.accept||data.size>options_.mtu)return;
+        auto const conv=KcpCore::decode32(data.data);
+        if(!KcpCore::validDatagram(data,conv,options_.mtu))return;
+        static_cast<void>(candidateCount());
+        std::size_t peers=0;
+        for(auto const& c:candidates_)if(c.active&&kcpSamePeer(c.peer,peer)){
+            if(c.conv==conv)return;
+            ++peers;
+        }
+        if(peers>=options_.perPeerCandidates)return;
+        auto now=kcpNow();
+        if(now-rateWindow_>=1000){rateWindow_=now;rateCount_=0;}
+        if(rateCount_>=options_.candidatesPerSecond)return;
+        for(auto& c:candidates_)if(!c.active){
+            c.peer=peer;c.conv=conv;c.expires=now+options_.candidateTtlMs;
+            c.length=data.size;std::memcpy(c.data.data(),data.data,data.size);c.active=true;++rateCount_;
+            deliverCandidate();return;
+        }
+    }
+    void deliverCandidate() noexcept {
+        if(!accept_.pending())return;
+        if(acceptToken_.stop_requested()){resumeLater(accept_.complete(Errc::canceled));return;}
+        static_cast<void>(candidateCount());
+        for(auto& c:candidates_)if(c.active){
+            KcpIncoming incoming;incoming.peer=c.peer;incoming.conv=c.conv;
+            incoming.expires_=c.expires;incoming.endpointId_=id_;
+            try{incoming.firstPacket.assign(c.data.data(),c.data.data()+c.length);}
+            catch(std::bad_alloc const&){resumeLater(accept_.complete(Errc::no_memory));return;}
+            c.active=false;resumeLater(accept_.complete(std::move(incoming)));return;
+        }
+    }
+    static void cancelAccept(void* p) {
+        auto& self=*static_cast<KcpEndpointBlock*>(p);
+        if(self.accept_.pending())self.resumeLater(self.accept_.complete(Errc::canceled));
+    }
     Packet* nextPacket() noexcept;
     void completePacket(Packet&,Result<void>) noexcept;
     void finishPump(bool rx) noexcept;
@@ -136,6 +224,12 @@ class KcpEndpointBlock final : public HandleBlock {
     std::vector<char> receiveBuffer_;
     std::vector<KcpSessionBlock*> sessions_;
     std::vector<Packet> packets_;
+    std::vector<Candidate> candidates_;
+    WaitSlot<KcpIncoming> accept_;
+    CancelHook acceptCancel_;
+    co2::stop_token acceptToken_;
+    std::uint64_t id_=0,rateWindow_=0;
+    std::size_t rateCount_=0;
     std::size_t cursor_=0;
     co2::stop_source stop_;
     co2::Task<> rxTask_,txTask_;
@@ -384,7 +478,7 @@ inline void KcpEndpointBlock::route(Datagram const& packet) noexcept {
     if(stopping_||packet.truncated||packet.size<24)return;
     auto* s=find(packet.sender,KcpCore::decode32(receiveBuffer_.data()));
     if(s){ConstBuffer data{receiveBuffer_.data(),packet.size};s->drive(&data);}
-    // Unknown peer/conv is never auto-created. Explicit bounded accept is added separately.
+    else offerCandidate(packet.sender,{receiveBuffer_.data(),packet.size});
 }
 inline KcpEndpointBlock::Packet* KcpEndpointBlock::nextPacket() noexcept {
     if(stopping_||sessions_.empty())return nullptr;
@@ -425,12 +519,27 @@ inline void KcpEndpointBlock::finishPump(bool rx) noexcept {
 inline void KcpEndpointBlock::stop(Errc error) noexcept {
     if(stopping_)return;
     stopping_=true;
+    if(accept_.pending())resumeLater(accept_.complete(error));
+    for(auto& c:candidates_)c.active=false;
     while(!sessions_.empty())sessions_.back()->stop(error);
     stop_.request_stop();
     if(!rxActive_){auto close=udp_.close();static_cast<void>(close);}
     maybeClose();
 }
 
+class KcpAcceptAwaiter {
+  public:
+    explicit KcpAcceptAwaiter(KcpEndpointBlock& e) noexcept:endpoint_{&e}{}
+    bool await_ready() const noexcept{return false;}
+    template<class P>bool await_suspend(co2::coroutine_handle<P> h){
+        owned_=endpoint_->beginAccept(h,co2compat::stopTokenOf(h),error_);return owned_;
+    }
+    Result<KcpIncoming> await_resume() noexcept {if(!owned_)return error_;
+        return endpoint_->takeAccept();}
+  private:
+    HandleRef<KcpEndpointBlock> endpoint_;
+    Errc error_=Errc::aborted;bool owned_=false;
+};
 class KcpReceiveAwaiter {
   public:
     explicit KcpReceiveAwaiter(KcpSessionBlock& s) noexcept:session_{&s}{}
@@ -539,7 +648,9 @@ class KcpEndpoint:public detail::Handle<detail::KcpEndpointBlock> {
   public:
     static Result<KcpEndpoint> create(Loop& loop,SocketAddress bind,KcpEndpointOptions options={}) {
         if(options.mtu<50||options.mtu>65507||options.packetLimit==0||options.packetLimit>65536||
-            options.sessionLimit==0||options.sessionLimit>4096)return Errc::invalid_argument;
+            options.sessionLimit==0||options.sessionLimit>4096||options.candidateLimit==0||
+            options.candidateLimit>4096||options.perPeerCandidates==0||options.candidatesPerSecond==0||
+            options.candidateTtlMs==0||options.candidateTtlMs>60000)return Errc::invalid_argument;
         auto udp=Udp::create(loop);if(!udp)return udp.error();
         auto bound=udp->bind(bind);if(!bound)return bound.error();
         std::unique_ptr<detail::KcpEndpointBlock> block;
@@ -551,6 +662,23 @@ class KcpEndpoint:public detail::Handle<detail::KcpEndpointBlock> {
         return KcpEndpoint{raw};
     }
     Result<SocketAddress> localAddress() const noexcept{return block().udp().localAddress();}
+    std::size_t sessionCount() const noexcept{return block().sessionCount();}
+    std::size_t candidateCount() noexcept{return block().candidateCount();}
+    detail::KcpAcceptAwaiter acceptPeer() noexcept{return detail::KcpAcceptAwaiter{block()};}
+    Result<KcpSession> openSession(KcpIncoming&& incoming,KcpSessionOptions options={}) {
+        if(!validIncoming(incoming,options,false))return Errc::invalid_argument;
+        auto session=openSession(incoming.peer,incoming.conv,options);
+        if(!session)return session.error();
+        incoming.used_=true;ConstBuffer data=buffer(incoming.firstPacket);
+        session->block().drive(&data);return std::move(*session);
+    }
+    Result<KcpStream> openStream(KcpIncoming&& incoming,KcpSessionOptions options={}) {
+        if(!validIncoming(incoming,options,true))return Errc::invalid_argument;
+        auto stream=openStream(incoming.peer,incoming.conv,options);
+        if(!stream)return stream.error();
+        incoming.used_=true;ConstBuffer data=buffer(incoming.firstPacket);
+        stream->block().drive(&data);return std::move(*stream);
+    }
     Result<KcpSession> openSession(SocketAddress peer,std::uint32_t conv,KcpSessionOptions options={}) {
         if(options.core.stream)return Errc::invalid_argument;
         auto result=openBlock(peer,conv,options);
@@ -564,6 +692,10 @@ class KcpEndpoint:public detail::Handle<detail::KcpEndpointBlock> {
         return KcpStream{*result};
     }
   private:
+    bool validIncoming(KcpIncoming const& incoming,KcpSessionOptions const& options,bool stream) const noexcept {
+        return !incoming.used_&&incoming.endpointId_==block().id()&&incoming.expires_>=detail::kcpNow()&&
+            KcpCore::validDatagram(buffer(incoming.firstPacket),incoming.conv,options.core.mtu,stream);
+    }
     Result<detail::KcpSessionBlock*> openBlock(SocketAddress peer,std::uint32_t conv,KcpSessionOptions options) {
         auto& endpoint=block();
         if(endpoint.stopping())return Errc::aborted;
