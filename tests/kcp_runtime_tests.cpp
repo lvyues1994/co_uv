@@ -111,6 +111,21 @@ TEST_CASE("KCP oversized receive terminally stops rather than wedging the queue 
     auto sa=a->openSession(*b->localAddress(),1),sb=b->openSession(*a->localAddress(),1,o);CHECK(sa&&sb);
     run(loop,oversizedBoth(*sa,*sb));run(loop,closeH(*sa));run(loop,closeH(*sb));run(loop,closeH(*a));run(loop,closeH(*b));drain(loop);
 }
+
+auto sendResult(KcpSession& s) CO2_BEG(co2::Task<Result<void>>,(s),Result<void> r;) {
+    CO2_AWAIT_SET(r,s.sendMessage(KcpMessage{'a'}));CO2_RETURN(r);
+} CO2_END
+auto byteBudget(Loop& loop,KcpSession& s) CO2_BEG(co2::Task<>,(loop,s),Result<void> r;) {
+    CO2_AWAIT_SET(r,s.sendMessage(KcpMessage{'a'}));CHECK(r);
+    CO2_AWAIT_SET(r,timeout(loop,10ms,sendResult(s)));CHECK(!r&&r.error()==Errc::timed_out);
+    CHECK(s.stats().waitingSegments==1);CO2_RETURN();
+} CO2_END
+TEST_CASE("KCP byte high water blocks independently of segment high water; cancel does not submit") {
+    Loop loop;auto a=KcpEndpoint::create(loop,local()),b=KcpEndpoint::create(loop,local());CHECK(a&&b);
+    KcpSessionOptions o;o.core.messageLimit=1;o.byteHighWater=1200;o.byteLowWater=0;o.byteHardLimit=2400;
+    auto s=a->openSession(*b->localAddress(),1,o);CHECK(s);run(loop,byteBudget(loop,*s));
+    run(loop,closeH(*s));run(loop,closeH(*a));run(loop,closeH(*b));drain(loop);
+}
 UVCO_TEST_MAIN
 #else
 int main(){std::fputs("FAIL: KCP coroutine runtime missing\n",stderr);return 1;}
