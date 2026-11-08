@@ -74,6 +74,9 @@ file(GLOB_RECURSE uvco_public_headers CONFIGURE_DEPENDS
 set(uvco_header_sources)
 foreach(header IN LISTS uvco_public_headers)
     file(RELATIVE_PATH include "${PROJECT_SOURCE_DIR}/include" "${header}")
+    if(NOT UVCO_ENABLE_KCP AND include MATCHES "^uvco/kcp")
+        continue()
+    endif()
     string(MAKE_C_IDENTIFIER "${include}" identifier)
     set(source "${CMAKE_CURRENT_BINARY_DIR}/header-self-containment/${identifier}.cpp")
     file(GENERATE OUTPUT "${source}" CONTENT "#include <${include}>\n")
@@ -81,6 +84,9 @@ foreach(header IN LISTS uvco_public_headers)
 endforeach()
 add_library(uvco-header-self-containment OBJECT ${uvco_header_sources})
 uvco_configure_test(uvco-header-self-containment)
+if(UVCO_ENABLE_KCP)
+    target_link_libraries(uvco-header-self-containment PRIVATE uvco::kcp)
+endif()
 
 
 
@@ -313,4 +319,12 @@ endif()
 if(UVCO_ENABLE_KCP)
     add_test(NAME uvco-kcp-vendor-tests COMMAND ${CMAKE_COMMAND}
         -DSOURCE=${PROJECT_SOURCE_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/kcp_vendor_tests.cmake)
+endif()
+
+if(UVCO_ENABLE_KCP)
+    add_executable(uvco-kcp-core-tests kcp_core_tests.cpp)
+    uvco_configure_test(uvco-kcp-core-tests)
+    target_link_libraries(uvco-kcp-core-tests PRIVATE uvco::kcp)
+    add_test(NAME uvco-kcp-core-tests COMMAND uvco-kcp-core-tests)
+    set_tests_properties(uvco-kcp-core-tests PROPERTIES TIMEOUT 30)
 endif()
