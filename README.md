@@ -401,3 +401,5 @@ KCP没有握手、认证、FIN或对端EOF；先带deadline等待drain再close�
 [验证](docs/verification.md)与[loopback/模拟基准](docs/benchmark-kcp.md)。
 
 可选基准：`-DUVCO_BUILD_KCP_BENCHMARK=ON`，运行 `uvco-kcp-latency`；不作为CI性能门禁。
+
+性能与复制路径审计、raw libuv 对照微基准见 [性能 review](docs/perf-review.md)。
