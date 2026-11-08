@@ -108,7 +108,8 @@ class KcpEndpointBlock final : public HandleBlock {
         }
     };
     KcpEndpointBlock(Loop &loop, Udp udp, KcpEndpointOptions options)
-        : HandleBlock{loop}, udp_{std::move(udp)}, options_{options}, receiveBuffer_(65507) {
+        : HandleBlock{loop, CloseResumePolicy::deferred}, udp_{std::move(udp)}, options_{options},
+          receiveBuffer_(65507) {
         static std::atomic<std::uint64_t> ids{1};
         id_ = ids.fetch_add(1, std::memory_order_relaxed);
         candidates_.reserve(options.candidateLimit);
@@ -342,7 +343,8 @@ class KcpSessionBlock final : public HandleBlock {
   public:
     KcpSessionBlock(Loop &loop, KcpEndpointBlock &endpoint, SocketAddress peer, std::uint32_t conv,
                     KcpSessionOptions options)
-        : HandleBlock{loop}, endpoint_{&endpoint}, peer_{peer}, conv_{conv}, options_{options} {}
+        : HandleBlock{loop, CloseResumePolicy::deferred}, endpoint_{&endpoint}, peer_{peer},
+          conv_{conv}, options_{options} {}
     Result<void> prepare() {
         auto core = KcpCore::create(conv_, options_.core, {this, &output});
         if (!core)

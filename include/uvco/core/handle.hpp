@@ -44,6 +44,9 @@ namespace detail {
 
 template<class Block> class HandleRef;
 
+// Default preserves all existing modules; protocol drivers may forbid native-stack resumes.
+enum class CloseResumePolicy { inlineNative, deferred };
+
 class HandleBlock : public LoopResident {
     template<class> friend class HandleRef;
   public:
@@ -83,7 +86,9 @@ class HandleBlock : public LoopResident {
     }
 
   protected:
-    explicit HandleBlock(Loop& loop) noexcept : loop_{&loop} {
+    explicit HandleBlock(Loop& loop,
+                         CloseResumePolicy policy = CloseResumePolicy::inlineNative) noexcept
+        : loop_{&loop}, closeResumePolicy_{policy} {
         UVCO_CONTRACT_CHECK(loop.isLoopThread());
         linkTo(loop);
     }
@@ -145,9 +150,14 @@ class HandleBlock : public LoopResident {
     static void onClose(uv_handle_t* const handle) noexcept {
         HandleBlock* const self = &fromData<HandleBlock>(handle->data);
         co2::coroutine_handle<> const waiter = self->closeWaiter_;
+        Loop* const loop = self->loop_;
+        CloseResumePolicy const policy = self->closeResumePolicy_;
         self->closed_ = true;
         self->destroyIfDone(); // 之后不再访问 self
-        if (waiter) waiter.resume();
+        if (waiter) {
+            if (policy == CloseResumePolicy::deferred) loop->schedule(waiter);
+            else waiter.resume();
+        }
     }
 
     void destroyIfDone() noexcept {
@@ -161,6 +171,7 @@ class HandleBlock : public LoopResident {
     bool owned_ = true; // 用户句柄（Handle<Block>）仍持有控制块
     bool closing_ = false;
     bool closed_ = false;
+    CloseResumePolicy closeResumePolicy_;
 };
 
 // An unstarted awaiter owns a reference separately from the pending-op count.
