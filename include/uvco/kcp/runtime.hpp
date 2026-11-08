@@ -196,6 +196,7 @@ class KcpSessionBlock final : public HandleBlock {
             if(options_.immediateFlushAfterInput){core_->flush();flushed=true;}
         }
         fulfillReceive();
+        fulfillRead();
         admitSender();
         if(stopping_)return;
         if(core_->deadLink()){stop(Errc::timed_out);return;}
@@ -227,6 +228,16 @@ class KcpSessionBlock final : public HandleBlock {
         if(!reserve(drain_,drainCancel_,waiter,std::move(token),&cancelDrain,error))return false;
         checkDrain();return true;
     }
+    bool beginRead(co2::coroutine_handle<> waiter,co2::stop_token token,MutableBuffer data,Errc& error) {
+        if(!reserve(read_,readCancel_,waiter,token,&cancelRead,error))return false;
+        readToken_=std::move(token);readBuffer_=data;
+        if(data.size==0)complete(read_,Result<std::size_t>{std::size_t{0}});
+        else if(!data.data)complete(read_,Errc::invalid_argument);
+        else fulfillRead();
+        return true;
+    }
+    std::size_t messageLimit() const noexcept {return core_->messageLimit();}
+    Result<std::size_t> takeRead() noexcept {readBuffer_={};return take(read_,readCancel_);}
     Result<KcpMessage> takeReceive() noexcept {return take(receive_,receiveCancel_);}
     Result<void> takeSend() noexcept {return take(send_,sendCancel_);}
     Result<void> takeDrain() noexcept {return take(drain_,drainCancel_);}
@@ -236,6 +247,7 @@ class KcpSessionBlock final : public HandleBlock {
         static_cast<void>(TimerBackend::stop(&timer_));
         if(send_.pending())complete(send_,reason);
         if(receive_.pending())complete(receive_,reason);
+        if(read_.pending())complete(read_,reason);
         if(drain_.pending())complete(drain_,reason);
         pendingMessage_.clear();
         endpoint_->remove(*this);
@@ -270,6 +282,20 @@ class KcpSessionBlock final : public HandleBlock {
         auto message=core_->recvMessage();
         if(message||message.error()!=Errc::again)complete(receive_,std::move(message));
     }
+    void fulfillRead() noexcept {
+        if(!read_.pending())return;
+        if(readToken_.stop_requested()){complete(read_,Errc::canceled);return;}
+        unsigned budget=128;
+        while(leftoverOffset_==leftover_.size()&&budget--!=0) {
+            auto unit=core_->recvStreamUnit();
+            if(!unit){if(unit.error()!=Errc::again)complete(read_,unit.error());return;}
+            leftover_=std::move(*unit);leftoverOffset_=0;
+        }
+        if(leftoverOffset_==leftover_.size())return;
+        auto n=(std::min)(readBuffer_.size,leftover_.size()-leftoverOffset_);
+        std::memcpy(readBuffer_.data,leftover_.data()+leftoverOffset_,n);leftoverOffset_+=n;
+        complete(read_,Result<std::size_t>{n});
+    }
     void admitSender() noexcept {
         if(!send_.pending())return;
         if(sendToken_.stop_requested()){
@@ -280,7 +306,7 @@ class KcpSessionBlock final : public HandleBlock {
         backpressured_=false;
         auto const count=(std::max)(std::size_t{1},(pendingMessage_.size()+core_->mtu()-25)/(core_->mtu()-24));
         if(waiting>=options_.highWater || waiting+count>options_.hardLimit){backpressured_=true;return;}
-        auto sent=core_->sendMessage(buffer(pendingMessage_));
+        auto sent=core_->streamMode()?core_->write(buffer(pendingMessage_)):core_->sendMessage(buffer(pendingMessage_));
         pendingMessage_.clear();
         if(!sent){auto error=sent.error();complete(send_,error);stop(error);return;}
         complete(send_,Result<void>{});
@@ -299,6 +325,10 @@ class KcpSessionBlock final : public HandleBlock {
         auto& s=*static_cast<KcpSessionBlock*>(p);
         if(s.receive_.pending())s.complete(s.receive_,Errc::canceled);
     }
+    static void cancelRead(void* p) {
+        auto& s=*static_cast<KcpSessionBlock*>(p);
+        if(s.read_.pending())s.complete(s.read_,Errc::canceled);
+    }
     static void cancelSend(void* p) {
         auto& s=*static_cast<KcpSessionBlock*>(p);
         if(s.send_.pending()){s.pendingMessage_.clear();s.complete(s.send_,Errc::canceled);}
@@ -315,6 +345,12 @@ class KcpSessionBlock final : public HandleBlock {
     std::unique_ptr<KcpCore> core_;
     WaitSlot<KcpMessage> receive_;
     WaitSlot<void> send_,drain_;
+    WaitSlot<std::size_t> read_;
+    CancelHook readCancel_;
+    co2::stop_token readToken_;
+    MutableBuffer readBuffer_;
+    KcpMessage leftover_;
+    std::size_t leftoverOffset_=0;
     CancelHook receiveCancel_,sendCancel_,drainCancel_;
     co2::stop_token receiveToken_,sendToken_;
     KcpMessage pendingMessage_;
@@ -439,6 +475,45 @@ class KcpDrainAwaiter {
     HandleRef<KcpSessionBlock> session_;
     Errc error_=Errc::aborted;bool owned_=false;
 };
+class KcpReadAwaiter {
+  public:
+    KcpReadAwaiter(KcpSessionBlock& s,MutableBuffer b) noexcept:session_{&s},buffer_{b}{}
+    bool await_ready() const noexcept{return false;}
+    template<class P>bool await_suspend(co2::coroutine_handle<P> h){
+        owned_=session_->beginRead(h,co2compat::stopTokenOf(h),buffer_,error_);return owned_;
+    }
+    Result<std::size_t> await_resume() noexcept {if(!owned_)return error_;
+        return session_->takeRead();}
+  private:
+    HandleRef<KcpSessionBlock> session_;
+    MutableBuffer buffer_;
+    Errc error_=Errc::aborted;bool owned_=false;
+};
+class KcpWriteAwaiter {
+  public:
+    KcpWriteAwaiter(KcpSessionBlock& s,ConstBuffer b) noexcept:session_{&s},buffer_{b}{}
+    bool await_ready() const noexcept{return false;}
+    template<class P>bool await_suspend(co2::coroutine_handle<P> h){
+        auto token=co2compat::stopTokenOf(h);
+        if(token.stop_requested()){error_=Errc::canceled;return false;}
+        if(buffer_.size&&!buffer_.data){error_=Errc::invalid_argument;return false;}
+        size_=(std::min)(buffer_.size,session_->messageLimit());
+        KcpMessage data;
+        try {if(size_)data.assign(buffer_.data,buffer_.data+size_);}
+        catch(std::bad_alloc const&){error_=Errc::no_memory;return false;}
+        owned_=session_->beginSend(h,std::move(token),std::move(data),error_);return owned_;
+    }
+    Result<std::size_t> await_resume() noexcept {
+        if(!owned_)return error_;
+        auto result=session_->takeSend();if(!result)return result.error();
+        return size_;
+    }
+  private:
+    HandleRef<KcpSessionBlock> session_;
+    ConstBuffer buffer_;
+    std::size_t size_=0;
+    Errc error_=Errc::aborted;bool owned_=false;
+};
 } // namespace detail
 
 class KcpSession:public detail::Handle<detail::KcpSessionBlock> {
@@ -447,6 +522,15 @@ class KcpSession:public detail::Handle<detail::KcpSessionBlock> {
   public:
     detail::KcpSendAwaiter sendMessage(KcpMessage message){return {block(),std::move(message)};}
     detail::KcpReceiveAwaiter recvMessage() noexcept{return detail::KcpReceiveAwaiter{block()};}
+    detail::KcpDrainAwaiter drain() noexcept{return detail::KcpDrainAwaiter{block()};}
+    void abort(Errc reason=Errc::aborted) noexcept{block().stop(reason);}
+};
+class KcpStream:public detail::Handle<detail::KcpSessionBlock> {
+    friend class KcpEndpoint;
+    explicit KcpStream(detail::KcpSessionBlock* block) noexcept:Handle{block}{}
+  public:
+    detail::KcpReadAwaiter readSome(MutableBuffer buffer) noexcept{return {block(),buffer};}
+    detail::KcpWriteAwaiter write(ConstBuffer buffer) noexcept{return {block(),buffer};}
     detail::KcpDrainAwaiter drain() noexcept{return detail::KcpDrainAwaiter{block()};}
     void abort(Errc reason=Errc::aborted) noexcept{block().stop(reason);}
 };
@@ -468,9 +552,22 @@ class KcpEndpoint:public detail::Handle<detail::KcpEndpointBlock> {
     }
     Result<SocketAddress> localAddress() const noexcept{return block().udp().localAddress();}
     Result<KcpSession> openSession(SocketAddress peer,std::uint32_t conv,KcpSessionOptions options={}) {
+        if(options.core.stream)return Errc::invalid_argument;
+        auto result=openBlock(peer,conv,options);
+        if(!result)return result.error();
+        return KcpSession{*result};
+    }
+    Result<KcpStream> openStream(SocketAddress peer,std::uint32_t conv,KcpSessionOptions options={}) {
+        options.core.stream=true;
+        auto result=openBlock(peer,conv,options);
+        if(!result)return result.error();
+        return KcpStream{*result};
+    }
+  private:
+    Result<detail::KcpSessionBlock*> openBlock(SocketAddress peer,std::uint32_t conv,KcpSessionOptions options) {
         auto& endpoint=block();
         if(endpoint.stopping())return Errc::aborted;
-        if((!peer.isIpv4()&&!peer.isIpv6())||peer.port()==0||options.core.stream||
+        if((!peer.isIpv4()&&!peer.isIpv6())||peer.port()==0||
             options.core.mtu>endpoint.options().mtu||options.lowWater>=options.highWater||
             options.highWater>options.hardLimit||options.outputLimit==0)return Errc::invalid_argument;
         if(endpoint.find(peer,conv))return Errc::address_in_use;
@@ -480,7 +577,7 @@ class KcpEndpoint:public detail::Handle<detail::KcpEndpointBlock> {
         catch(std::bad_alloc const&){return Errc::no_memory;}
         auto ready=session->prepare();if(!ready)return ready.error();
         int s=session->init();if(s<0)return static_cast<Errc>(s);
-        auto* raw=session.release();endpoint.add(*raw);raw->drive();return KcpSession{raw};
+        auto* raw=session.release();endpoint.add(*raw);raw->drive();return raw;
     }
 };
 } // namespace uvco
