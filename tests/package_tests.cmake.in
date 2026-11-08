@@ -57,3 +57,41 @@ foreach(mode IN ITEMS installed subdirectory fetchcontent)
         endif()
     endif()
 endforeach()
+
+if("@UVCO_ENABLE_KCP@")
+    file(GLOB_RECURSE versions "${work}/relocated/*/uvcoConfigVersion.cmake")
+    list(GET versions 0 version_file)
+    set(PACKAGE_FIND_VERSION "0.1.0")
+    set(CMAKE_SIZEOF_VOID_P 1)
+    include("${version_file}")
+    if(NOT PACKAGE_VERSION_UNSUITABLE)
+        message(FATAL_ERROR "Compiled KCP package incorrectly claims architecture independence")
+    endif()
+    foreach(mode IN ITEMS installed subdirectory fetchcontent)
+        set(extra)
+        if(NOT mode STREQUAL "installed")
+            list(APPEND extra "-DUVCO_SOURCE_DIR=@PROJECT_SOURCE_DIR@")
+        endif()
+        string(REPLACE ";" "\;" escaped_prefix "${prefix}")
+        run("@CMAKE_COMMAND@" -S "@PROJECT_SOURCE_DIR@/tests/kcp_consumer" -B "${work}/kcp-${mode}"
+            -G "@CMAKE_GENERATOR@" "-DCMAKE_C_COMPILER=@CMAKE_C_COMPILER@"
+            "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@" "-DCMAKE_BUILD_TYPE=@CMAKE_BUILD_TYPE@"
+            "-DCMAKE_C_FLAGS=@CMAKE_C_FLAGS@" "-DCMAKE_CXX_FLAGS=@CMAKE_CXX_FLAGS@"
+            "-DCMAKE_EXE_LINKER_FLAGS=@CMAKE_EXE_LINKER_FLAGS@" "-DCMAKE_PREFIX_PATH=${escaped_prefix}"
+            "-DUVCO_CONSUMER_MODE=${mode}" ${extra})
+        run("@CMAKE_COMMAND@" --build "${work}/kcp-${mode}" --config "${CONFIG}" --parallel 2)
+        run("@CMAKE_COMMAND@" -E chdir "${work}/kcp-${mode}" "@CMAKE_CTEST_COMMAND@" -C "${CONFIG}" --output-on-failure)
+    endforeach()
+    file(SHA256 "${work}/relocated/@CMAKE_INSTALL_DATADIR@/licenses/uvco/kcp/LICENSE" notice)
+    if(NOT notice STREQUAL "6587fd02a924b97dbd6758b0573ddec056fb494a84f3709c5aaa33ce1f7f029c")
+        message(FATAL_ERROR "Installed upstream MIT notice differs")
+    endif()
+else()
+    string(REPLACE ";" "\;" escaped_prefix "${prefix}")
+    execute_process(COMMAND "@CMAKE_COMMAND@" -S "@PROJECT_SOURCE_DIR@/tests/kcp_consumer"
+        -B "${work}/kcp-absent" "-DCMAKE_PREFIX_PATH=${escaped_prefix}"
+        RESULT_VARIABLE status OUTPUT_VARIABLE out ERROR_VARIABLE err)
+    if(status EQUAL 0)
+        message(FATAL_ERROR "OFF installation silently accepted required KCP component")
+    endif()
+endif()

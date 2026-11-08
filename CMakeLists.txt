@@ -134,8 +134,12 @@ if(UVCO_ENABLE_INSTALL)
         ${CMAKE_CURRENT_BINARY_DIR}/uvcoConfig.cmake
         INSTALL_DESTINATION ${_uvco_package_dir} PATH_VARS CMAKE_INSTALL_INCLUDEDIR)
     # 0.x: patch compatible, not cross-minor compatible.
+    set(_uvco_arch_option)
+    if(NOT UVCO_ENABLE_KCP)
+        set(_uvco_arch_option ARCH_INDEPENDENT)
+    endif()
     write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/uvcoConfigVersion.cmake
-        VERSION ${PROJECT_VERSION} COMPATIBILITY SameMinorVersion ARCH_INDEPENDENT)
+        VERSION ${PROJECT_VERSION} COMPATIBILITY SameMinorVersion ${_uvco_arch_option})
     install(FILES ${CMAKE_CURRENT_BINARY_DIR}/uvcoConfig.cmake
         ${CMAKE_CURRENT_BINARY_DIR}/uvcoConfigVersion.cmake
         cmake/uvcoDependencies.cmake cmake/co2_capability.cpp
