@@ -207,7 +207,7 @@ class KcpCore {
     Result<KcpMessage> receiveUnit() {
         auto size = peekMessageSize();
         if (!size) return size.error();
-        if (*size > state_->limit) return static_cast<Errc>(UV_EMSGSIZE);
+        if (!streamMode() && *size > state_->limit) return static_cast<Errc>(UV_EMSGSIZE);
         KcpMessage message;
         try { message.resize(*size); }
         catch (std::bad_alloc const&) { return Errc::no_memory; }

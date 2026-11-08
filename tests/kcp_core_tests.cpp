@@ -88,7 +88,7 @@ static void validation() {
 }
 static void streamAndDeadLink() {
     Wire ab,ba;CoreOptions o;o.stream=true;
-    auto a=KcpCore::create(9,o,{&ab,&Wire::output});auto b=KcpCore::create(9,o,{&ba,&Wire::output});CHECK(a&&b);
+    auto a=KcpCore::create(9,o,{&ab,&Wire::output});o.messageLimit=1;auto b=KcpCore::create(9,o,{&ba,&Wire::output});CHECK(a&&b);
     CHECK(a->sendMessage({nullptr,0}).error()==Errc::invalid_argument);
     std::vector<char> payload(3000,'s');auto written=a->write(buffer(payload));CHECK(written&&*written==payload.size());
     std::size_t total=0;
