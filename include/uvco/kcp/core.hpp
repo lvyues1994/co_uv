@@ -74,8 +74,9 @@ class KcpCore {
     KcpCore &operator=(KcpCore const &) = delete;
     static Result<KcpCore> create(std::uint32_t conv, CoreOptions options, KcpOutputSink sink) {
         if (!sink.tryCopy || options.mtu < 50 || options.mtu > 65507 || options.messageLimit == 0 ||
-            options.sendWindow < 1 || options.receiveWindow < 128 || options.interval < 10 ||
-            options.interval > 5000 || options.fastResend < 0 || options.deadLink < 1)
+            options.sendWindow < 1 || options.receiveWindow < 128 ||
+            options.receiveWindow > 65535 || options.interval < 10 || options.interval > 5000 ||
+            options.fastResend < 0 || options.deadLink < 1)
             return Errc::invalid_argument;
         std::unique_ptr<State> state;
         try {

@@ -110,6 +110,9 @@ static void validation() {
     o.mtu = 24;
     CHECK(KcpCore::create(1, o, {&w, &Wire::output}).error() == Errc::invalid_argument);
     o = CoreOptions{};
+    o.receiveWindow = 65536;
+    CHECK(KcpCore::create(1, o, {&w, &Wire::output}).error() == Errc::invalid_argument);
+    o = CoreOptions{};
     o.messageLimit = 1000000;
     auto r = KcpCore::create(5, o, {&w, &Wire::output});
     CHECK(r);
