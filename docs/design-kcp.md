@@ -404,3 +404,9 @@ IOFFSETOF(TYPE, MEMBER) ((size_t) &((TYPE *)0)->MEMBER) // ikcp.h:154
 另一选择是审批最小上游补丁或其他版本；不建议通过关闭 null sanitizer 绕过。
 
 依据“超出已批准语义先停下报告”的要求，当前停止后续实现，等待此编译策略确认。
+
+### 14.1 编译适配已获批准
+
+2026-11-08（Asia/Shanghai）用户批准 `src/kcp_adapter.c`：包含原始头文件，
+将 IOFFSETOF 重定义为标准 offsetof，再包含原始 C 文件。仅改变该 TU 的有效宏，
+vendor 文件/版本/SHA256 全部不变；不关闭任何 sanitizer。原§14审批阻塞已解除。

@@ -100,7 +100,7 @@ target_link_libraries(uvco INTERFACE
     $<INSTALL_INTERFACE:uvco::dependencies>)
 
 if(UVCO_ENABLE_KCP)
-    add_library(uvco_kcp STATIC third_party/kcp/ikcp.c)
+    add_library(uvco_kcp STATIC src/kcp_adapter.c)
     add_library(uvco::kcp ALIAS uvco_kcp)
     set_target_properties(uvco_kcp PROPERTIES EXPORT_NAME kcp POSITION_INDEPENDENT_CODE ON)
     target_link_libraries(uvco_kcp PUBLIC uvco::uvco)
