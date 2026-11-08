@@ -378,3 +378,5 @@ leader 退出后不保留“稍后再 SIGKILL 同一 PGID”的权限。后代�
 ## 项目信息
 
 [MIT License](LICENSE) · [Changelog](CHANGELOG.md) · [验证记录与平台范围](docs/verification.md) · [Review 修订](docs/review2.md)
+
+KCP 集成处于设计阶段，尚未实现：[分层、API 与待决策项](docs/design-kcp.md)。
