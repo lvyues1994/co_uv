@@ -379,4 +379,18 @@ leader 退出后不保留“稍后再 SIGKILL 同一 PGID”的权限。后代�
 
 [MIT License](LICENSE) · [Changelog](CHANGELOG.md) · [验证记录与平台范围](docs/verification.md) · [Review 修订](docs/review2.md)
 
-KCP 集成处于设计阶段，尚未实现：[分层、API 与待决策项](docs/design-kcp.md)。
+### KCP（实验性，默认关闭，尚未完成验收）
+
+`-DUVCO_ENABLE_KCP=ON` 构建可选静态 target `uvco::kcp`；使用者显式链接该 target 并包含
+`<uvco/kcp.hpp>`，安装包支持 `find_package(uvco CONFIG REQUIRED COMPONENTS kcp)`。
+原有 `uvco::uvco` 不自动启用 KCP。
+
+已实现纯 `KcpCore`（注入时间）、`KcpEndpoint::create/openSession/openStream`、
+消息 `KcpSession::sendMessage/recvMessage/drain`、字节流 `KcpStream::write/readSome/drain`，
+以及有界 `acceptPeer` 候选与显式 `openSession(std::move(candidate))`。未知 conv 不自动创建会话。
+`sendMessage` 成功只代表进入本地可靠队列；stream write 可短写，调用者根据返回字节数推进。
+KCP 没有 FIN/握手/认证；关闭是本地操作，非远端 EOF。取消 pending waiter 不撤销已提交消息。
+
+**当前阻塞**：原样上游 `IOFFSETOF` 空指针成员取址宏触发 UBSan；不是已批准的 OOM 限制。
+没有屏蔽报告或修改 vendor。Linux KCP CI、benchmark 和完整寿命回归仍待完成，勿视作生产可用。
+见[设计与新审批点](docs/design-kcp.md#14-实现进度与新审批点)、[验证记录](docs/verification.md)。

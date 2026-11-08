@@ -48,3 +48,14 @@ TSAN_OPTIONS=halt_on_error=1。日志可作为 CI artifact 保存，不依赖开
 本地验证平台为 Linux。macOS/Windows CI 为 continue-on-error 的实验项，QNX 尚未目标机验证。
 没有修改本地 sysctl，也没有关闭 sanitizer 或过滤报告来换取通过。
 真实 NSS、网络 FS、终端与信号 disposition 有系统语义差异；测试不构成硬实时保证。
+
+## KCP 实验实现：未完成验收
+
+新增测试均先确认RED：vendor缺失、Core缺失、runtime缺失、stream缺失、accept缺失；
+endpoint会话上限另有实际断言RED→GREEN。纯核覆盖模拟时钟/可重复丢包乱序、回绕、片数与整包预检、空消息、stream、dead_link。
+已跑真实UDP消息回环、stream小buffer余量与短写、取消、close后awaiter引用、有界候选/显式接入。
+
+四构建编译成功；g++/clang++/TSan 首次全套及随后每项连续3次重复均68/68，ASan+UBSan 64/68。
+ASan+UBSan四项KCP失败统一定位到原样vendor的IOFFSETOF空指针成员取址宏；未屏蔽、未修改。
+因此不能声称四构建全绿或KCP已验收，不能用本记录代替尚未补齐的关闭/并发/包/基准验证。
+详见[设计的新审批点](design-kcp.md#14-实现进度与新审批点)。未运行性能benchmark。

@@ -371,3 +371,36 @@ F. Release RTT/最大延迟/资源/公平性基准；只有证据支持才做共
 - [ikcp.h](https://github.com/skywind3000/kcp/blob/b1a7a2101dcbb96017681a500d6b82bbe5a88766/ikcp.h)
 - [ikcp.c](https://github.com/skywind3000/kcp/blob/b1a7a2101dcbb96017681a500d6b82bbe5a88766/ikcp.c)
 - [现有架构](architecture.md)、[统一 watcher 设计](design-watchers.md)、[验证方法](verification.md)
+
+## 14. 实现进度与新审批点
+
+已分步提交默认 OFF 的 vendor/target、纯核、Session、独立 Stream、共享 endpoint 与 pull accept。
+当前真实类型仍为 `Udp`；Session 使用相同 TimerBackend 的真实 one-shot timer anchor。
+endpoint 使用预分配 packet pool，公平轮转会话，首版 TX pump **串行、最多1个 native send**，
+不是设计预算上限32个并发。段数高/低/硬水位已经实现，字节占用可由段数×MTU保守估算；
+独立字节水位和持续 output-full 的保护阈值尚未完成。勿把提议值当作现有选项。
+
+输入默认即时 flush 已实现，但 input+sender admission 同轮的额外 flush 合并仍需收敛；
+超上限接收消息的终止路径、Loop-first/pending close/多waiter及候选TTL回归仍需补强。
+上述是后续审查事项，不是已通过的完整验收结论。安装基础consumer已通过，KCP专用consumer/双TU待补。
+benchmark与Linux KCP ON CI尚未实现；基础CI未改变，默认KCP仍OFF。
+
+### 必须先确认的 vendor 编译适配
+
+对 vendored C 也开启 ASan/UBSan 后，四项KCP测试稳定报错：
+
+```text
+ikcp.c:1081: member access within null pointer of type IKCPSEG
+IOFFSETOF(TYPE, MEMBER) ((size_t) &((TYPE *)0)->MEMBER) // ikcp.h:154
+```
+
+这是 container-of 所依赖的旧式 offsetof 宏引起的 UB 检查，非用户代码把实际 segment 传成 null。
+它不属于已接受的“部分分配失败不可恢复”，也不能通过不检测 vendor 或放宽 UBSan 假装全绿。
+原始文件的固定 SHA256 检查通过；目前没有改 vendor、加 suppression 或切换版本。
+
+**待审批问题**：是否允许新增 uvco 自己的 C 编译适配 TU，先包含原始 ikcp.h，
+将 IOFFSETOF 显式重定义为标准 offsetof，再包含原始 ikcp.c 来编译？
+原始 vendor 文件仍逐字节不变，ASan/UBSan继续检测全部代码；这改变有效宏定义，故不擅自当作“原样编译”。
+另一选择是审批最小上游补丁或其他版本；不建议通过关闭 null sanitizer 绕过。
+
+依据“超出已批准语义先停下报告”的要求，当前停止后续实现，等待此编译策略确认。
