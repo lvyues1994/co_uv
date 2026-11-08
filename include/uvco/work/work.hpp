@@ -36,6 +36,13 @@ template <> struct WorkResult<void> {
         return {};
     }
 };
+// Match invokeWork's preference for the stop_token overload, including
+// callables that also provide a no-argument overload.
+template <class F>
+auto workUsesToken(int)
+    -> decltype(static_cast<void>(std::declval<F &>()(std::declval<co2::stop_token>())),
+                std::true_type{});
+template <class F> std::false_type workUsesToken(...);
 template <class F> class Work final : public ReqAwaiter<Work<F>, uv_work_t, WorkValue<F>> {
     using R = WorkValue<F>;
     using Base = ReqAwaiter<Work<F>, uv_work_t, R>;
@@ -46,7 +53,7 @@ template <class F> class Work final : public ReqAwaiter<Work<F>, uv_work_t, Work
     int start(uv_loop_t *loop) {
         exception_ = nullptr;
         out_.reset();
-        source_ = co2::stop_source{};
+        prepareSource(decltype(workUsesToken<F>(0)){});
         return uv_queue_work(loop, &this->req_, &onWork, &onDone);
     }
     // Always try dequeue first. Only a running/finished worker needs the
@@ -64,6 +71,10 @@ template <class F> class Work final : public ReqAwaiter<Work<F>, uv_work_t, Work
     }
 
   private:
+    void prepareSource(std::true_type) {
+        source_ = co2::stop_source{};
+    }
+    void prepareSource(std::false_type) noexcept {}
     static void onWork(uv_work_t *req) noexcept {
         auto &self = *static_cast<Work *>(req->data);
         try {
@@ -78,7 +89,7 @@ template <class F> class Work final : public ReqAwaiter<Work<F>, uv_work_t, Work
         Base::complete(req, status); // may destroy self; no access afterwards
     }
     F fn_;
-    co2::stop_source source_;
+    co2::stop_source source_{co2::nostopstate};
     co2compat::ResultStorage<R> out_;
     std::exception_ptr exception_;
 };

@@ -16,4 +16,6 @@ using RethrowResult=decltype(TaskAccess::rethrowError(std::declval<co2::Task<int
 static_assert(std::is_same<decltype(HandleAccess::header(std::declval<co2::coroutine_handle<>>())),FrameHeader*>::value,
               "HandleAccess::header changed");
 static_assert(sizeof(LateInit<ResultStorage<int>>)>0,"co2 result storage changed");
+static_assert(std::is_constructible<co2::stop_source,decltype(co2::nostopstate)>::value,
+              "co2 no-state stop_source construction required");
 int main() { FrameHeader h{&noopDestroy,nullptr,false,false}; (void)h; return 0; }
