@@ -1,6 +1,7 @@
 # uvco 数据路径与 libuv 性能架构 review
 
-日期：2026-11-08（Asia/Shanghai）。审计基线1fb3851；只新增可选benchmark及本文，**未改库行为**。
+日期：2026-11-08（Asia/Shanghai）。§1–5 保留初次审计（基线1fb3851/f21802a）的证据和数字；
+**已批准的前三项优化现已实施，最新状态见§6；公开语义未改变。**
 
 ## 1. 结论：不等于“端到端零拷贝”，也不等于“零开销”
 
@@ -130,7 +131,7 @@ build/perf-release/uvco-libuv-overhead forward
 本次验证：g++ Release五轮计数+五轮非计数；clang++ Release编译/运行；ASan+UBSan运行（包括泄漏检查）通过。
 benchmark提交为`2bf06c3`。没有为性能表使用sanitizer结果；本任务不宣称重新完成四套全量CTest，也未推送/运行远端CI。
 
-## 5. 优化建议（本次全部只提案，实施需批准）
+## 5. 初次 review 的优化排序（前三项已获批准并实施，见§6；其余仍需批准）
 
 | 优先级 | 可落实建议与预期影响 | 成本/风险/审批 |
 |---|---|---|
@@ -147,3 +148,78 @@ benchmark提交为`2bf06c3`。没有为性能表使用sanitizer结果；本任�
 不要把libuv共有的内核copy、TCP本身、KCP协议冗余算成co2包装损耗；也不要把安全契约当成免费。
 后续若要给生产容量结论，应增加单向流水线TCP吞吐、真实backpressure、UDP批量与recv hop、取消开启/关闭、
 Work/DNS、Task创建率与内存峰值的专项，固定CPU/多进程多次采样并报告区间。
+
+## 6. 已批准的三项优化（2026-11-08，Asia/Shanghai）
+
+### 实施与契约
+
+1. `771fb18`：`stream/stream.hpp` 把 CancelHook 移到按需创建的 native write Req。
+   x86_64 WriteAwaiter 从200B降到64B，默认co2槽可内联；try_write全部成功无awaiter装箱/native Req分配。
+   排队路径仍分配Req，取消仍关闭整个流、等原生callback再释放借用buffer；部分写失败仍关闭。
+   writev描述符容器与调用者payload所有权没有变化，不宣称所有writev/背压写都零分配。
+2. `d092258`：共用内部 `detail/string_read_tail.hpp`，先resize拥有string，再直接提供尾部buffer，
+   成功commit实际长度，EOF/错误/异常/取消rollback未提交部分；BufferedReader.bufferedBytes不暴露pending tail。
+   省去每次4KiB frame临时区→append的payload copy，fill Task和最终拥有型返回string仍存在；消费前缀erase仍可能搬移。
+   C++14 resize仍初始化尾部并可能搬移扩容，EOF前的预扩容也可能产生多余分配；这不是任意负载必胜或端到端零拷贝。
+   capture每次最多扩展到剩余cap，cap耗尽用1字节probe区别EOF/越界；零cap和恰好达到cap都已回归。
+   改变的是内部读取块尺寸/分配时机，不改变公开的output cap、Result错误、取消与reap规则。
+3. `7943445`：Work初始nostopstate；无token callable不构造内部停止状态；token-aware callable在每次真正start时
+   分配新状态，保留stop_possible、合作停止与重新提交代际隔离；双重载仍优先token版本。
+   仍然有Task frame/大右值awaiter可能装箱，异常仍在after-work清理后重抛；晚到取消继续返回已完成结果。
+4. `51410ca`：测试fixture用链接wrap调用真实new/new[]，保留ASan/TSan allocator interceptors。
+   最初直接定义operator new与Clang TSan运行库强符号冲突，已修正测试工具；没有关闭任何库/新测试的sanitizer。
+
+### RED→GREEN 回归证据
+
+- write allocation：优化前`count==0`失败（右值awaiter装箱），优化后同一测试通过，另验证sizeof不超过co2默认槽；
+  原有pending cancel、partial write故障测试保持通过。
+- read copy：优化前BufferedReader和capture的受拦截append字节数非零，优化后都是零。
+  ABI相关copy fixture只在Linux/libstdc++ C++11 ABI注册；普通行为测试继续跨平台。
+  另验证bufferedBytes逻辑长度、抛异常后保留已提交4096B并恢复读取、cap=0/4096恰满、超过cap。
+- Work allocation：优化前构造plain/cooperative Work各1次new，`n==0`失败；优化后构造皆0。
+  使用帧外lvalue Work（排除Task/装箱），重复提交plain每次0，cooperative每次1个停止状态分配；
+  原有取消、晚取消、worker异常测试保持通过。
+- 计数只覆盖C++分配调用，不覆盖libuv malloc/内核或worker内任意用户分配；不会把结果泛化为整个queueWork API零分配。
+
+### 复测
+
+已完成新旧同窗复测：旧基线`f21802a`的include通过git archive提取到项目build下（不切换/重置工作树），
+新代码`51410ca`；相同g++13.3 `-O3 -DNDEBUG`、co2、系统libuv1.48、相同benchmark源码。
+在所有build/CTest结束后运行，五轮交替新/旧进程先后顺序，各进程内也交替raw/uvco TCP先后；
+另各五轮开计数。保留§4相同warmup/样本数、单机loopback、无绑核/频率锁定条件。
+以下仍是五次分位数的中位数，吞吐仍为stop-and-wait echo goodput。
+
+| 场景 | p50 μs 前→后 | p99 μs 前→后 | echo MiB/s 前→后 |
+|---|---:|---:|---:|
+| raw_tcp / 128B | 3.981 → 3.976 | 7.923 → 9.928 | 27.600 → 25.460 |
+| uvco_tcp / 128B | 4.147 → 4.112 | 4.806 → 5.528 | 29.160 → 25.750 |
+| raw_tcp / 65536B | 12.479 → 12.513 | 14.737 → 14.695 | 4967.020 → 4960.860 |
+| uvco_tcp / 65536B | 12.685 → 12.681 | 14.927 → 14.956 | 4882.900 → 4899.200 |
+| raw_timer_reuse / 1B | 0.110 → 0.111 | 0.126 → 0.128 | — |
+| raw_timer_close / 1B | 0.115 → 0.114 | 0.130 → 0.129 | — |
+| uvco_sleep_rvalue / 1B | 0.143 → 0.145 | 0.160 → 0.161 | — |
+| uvco_sleep_local / 1B | 0.129 → 0.130 | 0.147 → 0.147 | — |
+| uvco_timer_tick / 1B | 0.130 → 0.130 | 0.145 → 0.143 | — |
+
+- 128B TCP p50 4.147→4.112μs（约-0.84%），64KiB 12.685→12.681μs（约-0.03%）。
+  相对同进程raw的配对p50开销中位数：128B 4.01%→3.61%，64KiB 1.49%→1.31%。
+  不将这些小差值当作已证明的稳定加速：128B uvco goodput 29.16→25.75 MiB/s，
+  raw也由27.60→25.46，且尾延迟漂移明显；保留不利数据，不用选择最佳轮次掩盖噪声。
+- **分配结论稳定且可归因**：五轮旧版TCP steady-state都是2 new/echo round，新版都是0，
+  即本负载每个热路径write await从1降到0；read仍0。没有把原生uv_write fallback、writev容器或建帧算入此0。
+- Sleep右值仍1 new/await，帧局部Sleep、Timer tick仍0；empty Task仍1 new/task。其计时接近原值，未作这些优化。
+- BufferedReader/capture的临时append复制已由独立回归验证移除；Work构造/提交分配由独立计数测试验证。
+  本TCP benchmark不经过它们，不能用TCP数字声称它们的实际CPU加速。
+
+### 最终验证
+
+| 构建 | 完整CTest | 每项连续重复 | 实际执行 |
+|---|---:|---:|---:|
+| g++ Debug | 75/75 | 3 | 225 |
+| clang++ Debug | 75/75 | 3 | 225 |
+| ASan+UBSan（含leak检查） | 75/75 | 3 | 225 |
+| TSan | 75/75 | 3 | 225 |
+
+四套共900次执行全通过，包含新增分配/copy测试、既有取消/部分写/异常/drain、KCP、安装/源码/两TU consumer。
+Linux C/C++ sanitizer flags保持开启；未推送，未运行远端CI，未额外声称macOS/Windows原生实测。
+历史§4中的初次验证范围不代表本节最新结果。
