@@ -1,4 +1,4 @@
-# KCP 集成设计（待确认，尚未实现）
+# KCP 集成设计（已批准；按阶段实现）
 
 ## 0. 已批准原则：先固定边界，再讨论 API
 
@@ -13,7 +13,7 @@
    默认预设为 **nodelay=1 / interval=20ms / resend=2 / nc=0**；turbo 显式选择 **1/10/2/1**，
    不暗中关闭拥塞控制。验收看 RTT 分位数和最大延迟；30–40% / 3x 只是待测假设，不是承诺。
 
-本文是设计文档，不新增实现、构建选项或现有公共符号。§12 的默认值仍需用户决策。
+本设计已批准；实现、构建与测试按§13分阶段提交。§12记录已确认决策，不代表所有模块已实现。
 依据《KCP 协议源码学习笔记：从 ARQ 到 uvco 集成》（2026-11-08、上述固定版本）和当前工程
 `f933b61` 的 include、architecture、design-watchers；上游固定链接见文末。
 该提交是 KCP V2（含可插拔 CC）；首版不开放 CC 插件，不能混用 v1 分支的头/源码或旧教程返回值。
@@ -328,14 +328,31 @@ goodput、线上总字节/重传/ACK占比、CPU、RSS、队列峰值/丢弃、t
 记录带宽代价是否约10–20%、nc=1的公平性代价；无丢包或竞争网络可能更差也如实报告。
 验收包括低尾延迟与可接受资源/公平性，不以一个平均值掩盖忙转或最大延迟退化。
 
-## 12. 待用户决定（本次不擅自实现）
+## 12. 已确认决策（2026-11-08，Asia/Shanghai）
 
-1. 是否同意 UVCO_ENABLE_KCP 默认 OFF，显式链接 uvco::kcp 才启用？（建议 OFF。）
-2. 首版是否只提供消息模式，stream/KcpStream 延后？（建议消息模式，不混用 recvMessage 与字节流。）
-3. 未知 conv 接入选择 pull 式 acceptPeer 候选 API，还是有界 noexcept 通知回调？（建议 pull；默认均不自动创建会话。）
-4. 是否同意默认应用消息上限64KiB、KCP MTU1200，并始终取不超过127*MSS的有效上限？（建议同意，可配置。）
-5. 是否默认启用 input 后即时 flush（有限 batch 至多一次），还是作为低延迟选项关闭？（建议启用，并以尾延迟/CPU基准验收。）
-6. 是否接受原样 vendor 的部分 OOM 不可恢复限制？（若要求所有 OOM 都返回 Result，须重新审批 allocator/上游修复方案，不能在当前约束下承诺。）
+1. UVCO_ENABLE_KCP 默认 OFF；启用后显式链接 uvco::kcp，支持安装/导出。
+2. 首版包含 stream 模式，使用独立 KcpStream；不与 KcpSession 的消息接口混用。
+3. 未知 conv 使用 pull 式 acceptPeer，有界候选，绝不自动创建会话。
+4. 默认应用消息上限64KiB、KCP MTU1200；有效上限 min(config,127*MSS)，可配置。
+5. input 后即时 flush 默认 ON；每个有限 batch 至多一次，用尾延迟/CPU基准验证。
+6. 接受原样 vendor 的部分 OOM 不可恢复限制，文档明确边界。
+
+### 12.1 首版 KcpStream（与消息 API 隔离）
+
+KcpStream 在创建 Core 时设 stream 模式，之后不允许切换；公共工厂只返回一种 facade。
+不暴露 recvMessage/sendMessage，不把一次 write 映射成远端消息边界。
+拟议 write(ConstBuffer)、readSome(MutableBuffer)、drain()/close() 与现有流命名对齐；
+write 成功表示整份输入进入本地可靠队列，不表示对端消费。单 pending writer/reader，第二个返回 busy。
+write 在进入 KCP 前复制并检查预算；KCP可能短接受，已接受前缀不可回滚，
+不把失败后的整段输入再提交。发送前取消保证零提交；发生部分提交后的取消仅取消等待，不撤销前缀，
+API必须保留已接受字节数（Result<size_t> 成功可为短写），与消息模式的整条 admission 分开。
+
+ikcp_recv 取完整内部单元，不能拿很小用户 buffer 直接反复调用：readSome 先取一个完整单元至
+有界 leftover buffer，再复制 min(用户容量,剩余长度)，保留余量供下次读取。
+只维护一个 leftover，不无界搬运 rcv_queue；该 buffer计入接收预算。取消发生在消费前不拿走数据，
+已完成 read 的迟到取消不覆盖结果；空 buffer请求返回0，不借此宣称网络 EOF。
+KCP没有 FIN；对端 close 不会自然导致本端 EOF。显式本地 close/abort、dead_link 和超时按Session错误模型处理。
+混合 message/stream peer不做自动协商或兼容，创建时由应用外部协议约定。
 
 ## 13. 审批后的实施顺序
 
@@ -346,7 +363,7 @@ D. Session 稳址控制块/one-shot driver、send/recv/drain、背压/stop-token
 E. 多peer/conv显式注册与有界 accept，ON/OFF安装/consumer/双TU和四构建重复。
 F. Release RTT/最大延迟/资源/公平性基准；只有证据支持才做共享 timer 或更激进预设。
 
-每步独立提交与回归；未审批前不 vendor、不改 API/CMake、不改变默认构建。
+每步独立提交与回归；默认构建仍关闭 KCP，任何超出已批准语义的改变先报告审批。
 
 ### 固定来源
 
