@@ -416,7 +416,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT MSVC)
         set(_uvco_count_new _Znwj)
         set(_uvco_count_array _Znaj)
     endif()
-    foreach(t uvco-work-allocation-tests uvco-write-allocation-tests)
+    foreach(t uvco-work-allocation-tests uvco-write-allocation-tests uvco-req-awaiter-tests)
         target_compile_definitions(${t} PRIVATE UVCO_TEST_WRAP_NEW=1
             UVCO_TEST_NEW_SYMBOL="${_uvco_count_new}"
             UVCO_TEST_NEW_ARRAY_SYMBOL="${_uvco_count_array}")

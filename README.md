@@ -15,7 +15,7 @@ Signal/phase hooks、Process/capture、DNS resolver/cache、Happy Eyeballs 核�
 - C++14 编译器（已测试 g++ 13、clang++ 18）
 - CMake ≥ 3.14（使用 CMakePresets.json 需 ≥ 3.21）
 - libuv ≥ 1.40：优先 `find_package(libuv)`，其次 pkg-config，最后 FetchContent（v1.48.0）
-- co2：优先 `find_package(co2 CONFIG)`，否则 FetchContent（固定提交 `0be5ab2f1b72be3755d8d13fb02d4bf32f652539`，见 `UVCO_CO2_GIT_TAG`）
+- co2：优先 `find_package(co2 CONFIG)`，否则 FetchContent（固定提交 `0be5ab2f1b72be3755d8d13fb02d4bf32f652539`，见 `UVCO_CO2_GIT_TAG`）。`find_package(co2)` 必须通过 `cmake/co2_capability.cpp`（含就地左值等待，要求 0be5ab2 或更新）
 
 ## 构建与测试
 

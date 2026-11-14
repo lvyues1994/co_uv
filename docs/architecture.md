@@ -85,9 +85,10 @@ uvco/
   - `uv_xxx_t` 请求体放在 awaiter 内，`req.data` 指向 awaiter；libuv 回调写入结果后直接
     `resume()`。全部在 loop 线程，无需原子量（不复用 `co2::CallbackAwaitable`）。
   - 大请求（`uv_fs_t` 约 440 字节）按 §7 由协程帧直接持有：把 awaiter 声明为帧局部变量后
-    `CO2_AWAIT(op)`，其 `operator_co_await() &` 返回一个指针大小的 `AwaiterRef` 放进 co2 的
-    内联槽，零堆分配，且 awaiter 可重复等待。直接 await 一个临时 awaiter 也可以，但大请求
-    会超出内联槽，产生一次堆分配。
+    `CO2_AWAIT(op)`。co2 0be5ab2 起对左值就地等待，帧里只记指针，零堆分配，且 awaiter
+    可重复等待。直接 await 一个临时 awaiter 也可以，但大请求会超出内联槽，产生一次堆分配。
+    因此 `find_package(co2)` 必须通过 `cmake/co2_capability.cpp` 的就地左值探测；更早的
+    co2 会把左值拷进槽，无法等待不可复制的帧局部 `ReqAwaiter`。
 
 ### 4.2 句柄生命周期
 

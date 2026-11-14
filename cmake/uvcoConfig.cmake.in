@@ -28,7 +28,7 @@ uvco_check_co2(_uvco_co2_ok "${_uvco_include_dir}" "${CMAKE_CURRENT_LIST_DIR}/co
 uvco_check_libuv(_uvco_libuv_ok ${_uvco_libuv_target})
 if(NOT _uvco_co2_ok OR NOT _uvco_libuv_ok)
     set(uvco_FOUND FALSE)
-    set(uvco_NOT_FOUND_MESSAGE "Incompatible co2 internal API or libuv headers < 1.40; see configure probe diagnostics")
+    set(uvco_NOT_FOUND_MESSAGE "Incompatible co2 (need lvalue in-place await from 0be5ab2 or later, plus the current TaskAccess/FrameHeader surface) or libuv headers < 1.40; see cmake/co2_capability.cpp")
     return()
 endif()
 if(NOT TARGET uvco::dependencies)

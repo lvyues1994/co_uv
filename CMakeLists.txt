@@ -47,7 +47,7 @@ endif()
 uvco_check_co2(_uvco_co2_ok "${CMAKE_CURRENT_SOURCE_DIR}/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/co2_capability.cpp")
 if(NOT _uvco_co2_ok)
-    message(FATAL_ERROR "Incompatible co2 internal API; see cmake/co2_capability.cpp")
+    message(FATAL_ERROR "Incompatible co2: uvco requires co2 that awaits lvalues in place (0be5ab2 or later) and the current TaskAccess/FrameHeader surface; see cmake/co2_capability.cpp")
 endif()
 
 # ---- libuv --------------------------------------------------------------------

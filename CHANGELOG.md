@@ -16,6 +16,7 @@
 - MIT LICENSE；Result create 工厂与统一格式规则。
 
 ### Changed
+- ReqAwaiter 不再提供 `operator_co_await() &` 包装：左值等待改由 co2 就地完成；`find_package(co2)` 需通过就地左值能力探测（0be5ab2 或更新）。公开等待语义不变。
 - FetchContent 锁定的 co2 升级到 `0be5ab2f1b72be3755d8d13fb02d4bf32f652539`（仍为 0.3.0-pre）；公开 API 与热路径 64B 槽不变。
 - WriteAwaiter 热路径保持 co2 默认64B槽内联，pending native Req 才拥有 CancelHook；try_write 成功的右值 await 不再装箱分配。
 - BufferedReader 与 process capture 直接读入带异常/取消回滚的 string 尾部；已提交字节、输出 cap、EOF 与 reap 契约不变。

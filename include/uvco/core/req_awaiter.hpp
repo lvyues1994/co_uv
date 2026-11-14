@@ -44,8 +44,10 @@
 //   1. 右值：CO2_AWAIT_SET(r, FsStat{loop, path});  awaiter 被移进 co2 的 awaiter 槽，
 //      超过内联容量（8 指针）时退化为一次堆分配；
 //   2. 帧局部（零分配，§7“大请求存储”）：把 awaiter 声明在 CO2_BEG 的局部列表里，
-//      以左值等待：CO2_AWAIT_SET(r, op); operator_co_await() & 返回一个只含指针的
-//      引用 awaiter，请求体就住在协程帧里。完成后可以再次等待同一个对象。
+//      以左值等待：CO2_AWAIT_SET(r, op)。co2 0be5ab2 起对左值就地等待，帧里只记
+//      地址，请求体仍住在协程帧里，完成后可以再次等待同一个对象。这要求 co2 具备
+//      就地左值等待（cmake/co2_capability.cpp）；更早的 co2 会把左值拷进槽，无法
+//      等待不可复制的帧局部 ReqAwaiter。
 
 namespace uvco {
 namespace detail {
@@ -58,19 +60,6 @@ struct IsCancellable<Derived, typename std::enable_if<not Derived::cancellable>:
 template<class D, class = void> struct RespectsStop : std::true_type {};
 template<class D> struct RespectsStop<D, typename std::enable_if<not D::respectStop>::type>
  : std::false_type {};
-
-template <class Awaiter> struct AwaiterRef {
-    Awaiter* awaiter;
-
-    bool await_ready() const noexcept { return awaiter->await_ready(); }
-
-    template <class Promise>
-    bool await_suspend(co2::coroutine_handle<Promise> const waiting) {
-        return awaiter->await_suspend(waiting);
-    }
-
-    decltype(auto) await_resume() { return awaiter->await_resume(); }
-};
 
 template <class Derived, class Req, class T> class ReqAwaiter {
   public:
@@ -126,11 +115,6 @@ template <class Derived, class Req, class T> class ReqAwaiter {
         state_ = State::idle;
         waiter_ = nullptr;
         return derived().finish(status_);
-    }
-
-    // 帧局部用法：以左值等待时借用自己，不复制请求体。
-    AwaiterRef<Derived> operator_co_await() & noexcept {
-        return AwaiterRef<Derived>{&derived()};
     }
 
   protected:

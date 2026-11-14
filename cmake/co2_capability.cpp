@@ -18,4 +18,23 @@ static_assert(std::is_same<decltype(HandleAccess::header(std::declval<co2::corou
 static_assert(sizeof(LateInit<ResultStorage<int>>)>0,"co2 result storage changed");
 static_assert(std::is_constructible<co2::stop_source,decltype(co2::nostopstate)>::value,
               "co2 no-state stop_source construction required");
+// uvco 帧局部 ReqAwaiter 不可复制。co2 0be5ab2 起对左值 co_await 只在帧里存指针；
+// 更早的 co2 会把 awaiter decay 后拷进槽，无法从左值构造不可移动的 awaiter。
+struct UvcoImmovableAwaiter {
+    UvcoImmovableAwaiter() = default;
+    UvcoImmovableAwaiter(UvcoImmovableAwaiter const&) = delete;
+    UvcoImmovableAwaiter(UvcoImmovableAwaiter&&) = delete;
+    UvcoImmovableAwaiter& operator=(UvcoImmovableAwaiter const&) = delete;
+    UvcoImmovableAwaiter& operator=(UvcoImmovableAwaiter&&) = delete;
+    bool await_ready() const noexcept { return true; }
+    template <class H>
+    void await_suspend(H) const noexcept {}
+    void await_resume() const noexcept {}
+};
+using UvcoLvalueAwaiter = co2::detail::AwaiterOf<UvcoImmovableAwaiter&>;
+static_assert(sizeof(UvcoLvalueAwaiter) == sizeof(void*),
+              "uvco requires co2 that awaits lvalues in place (commit 0be5ab2 or later); "
+              "the installed co2 copies lvalue awaiters into the frame");
+static_assert(std::is_constructible<UvcoLvalueAwaiter, UvcoImmovableAwaiter&>::value,
+              "uvco requires co2 that can form a pointer awaiter from an lvalue");
 int main() { FrameHeader h{&noopDestroy,nullptr,false,false}; (void)h; return 0; }

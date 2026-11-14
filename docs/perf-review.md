@@ -66,7 +66,7 @@
 | co2 AwaitSlot | 默认64B（`co2/config.hpp:10`）；过大/不适合内联的右值awaiter在`co2/detail/await_slot.hpp:99-106` new。实测read=24B、write=200B、Sleep=360B、UDP send=64B；不要把源码旧“write<=8指针”注释当事实 |
 | HandleBlock/HandleRef | 每个Tcp/Udp/Timer等拥有heap控制块，而非每次read新建。HandleRef普通计数++/--，**不是shared_ptr、不是原子ref**（`core/handle.hpp:120-133,179-185`）；句柄操作限loop线程。虚析构/close/abort及newPeer是少量虚调用，不是每字节virtual |
 | WaitSlot | 控制块内联state/waiter/Result存储（`core/wait_slot.hpp:15-65`），没有隐含heap；Result值移动可能触发用户T自定义成本 |
-| ReqAwaiter | req_直接嵌入awaiter，complete直接resume（`core/req_awaiter.hpp:123-180`）；lvalue引用awaiter仅指针，适合帧局部复用（45-48）。FsOp/Sleep/Work/DNS大右值会装箱，不是uv_req_t必定另外new |
+| ReqAwaiter | req_直接嵌入awaiter，complete直接resume（`core/req_awaiter.hpp`）；左值由 co2 就地等待，帧里只记指针，适合帧局部复用。FsOp/Sleep/Work/DNS大右值会装箱，不是uv_req_t必定另外new |
 | stream write | 即使try_write完成，**右值awaiter装箱1次**；需排队时还new Req（stream.hpp:431）。read常规内联无独立分配；多buffer另算描述符vector |
 | UDP | send64B适合默认槽，try_send快路径无额外装箱/native Req；fallback1 native Req。recv waiter本身小且无payload分配；但接收完成schedule+stopFrame是额外调度（udp.hpp:194-206） |
 | CancelHook | stop不可能时立即return；否则placement-new回调到内联storage，不为hook另new（`core/cancel.hpp:43-58,83`）。co2 StopState拥有atomic ref/request标志+mutex，注册/注销锁链表（`co2/stop_token.hpp:58-62,94-121`）；复制有效token也有atomic ref，不要把它与HandleRef混淆。停止请求post到loop再处理，含mutex+uv_async_send；disarm还unpost |

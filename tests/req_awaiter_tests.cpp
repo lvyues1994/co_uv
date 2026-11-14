@@ -8,6 +8,9 @@
 #include <co2/co2.hpp>
 
 #include "test.hpp"
+#ifdef UVCO_TEST_WRAP_NEW
+#include "allocation_counter.hpp"
+#endif
 #include "uvco/core.hpp"
 
 #ifndef UVCO_TEST_SOURCE_FILE
@@ -23,6 +26,7 @@ struct FsStat : uvco::detail::ReqAwaiter<FsStat, uv_fs_t, uv_stat_t> {
     ~FsStat() { uv_fs_req_cleanup(&req_); }
 
     int start(uv_loop_t* const loop) {
+        startedAt = this;
         ++starts;
         if (onStart) onStart();
         return uv_fs_stat(loop, &req_, path.c_str(), &FsStat::onDone);
@@ -44,6 +48,7 @@ struct FsStat : uvco::detail::ReqAwaiter<FsStat, uv_fs_t, uv_stat_t> {
     }
 
     std::string path;
+    void* startedAt = nullptr;
     int starts = 0;
     int cancels = 0;
     bool cancelOnLoopThread = false;
@@ -51,9 +56,11 @@ struct FsStat : uvco::detail::ReqAwaiter<FsStat, uv_fs_t, uv_stat_t> {
 };
 
 static_assert(std::is_same<co2::detail::AwaiterOf<FsStat&>,
-                           uvco::detail::AwaiterRef<FsStat>>::value,
-              "an lvalue ReqAwaiter is awaited through a pointer-sized reference");
-static_assert(sizeof(uvco::detail::AwaiterRef<FsStat>) == sizeof(void*), "");
+                           co2::detail::AwaiterRef<FsStat>>::value,
+              "an lvalue ReqAwaiter is awaited in place through co2::detail::AwaiterRef");
+static_assert(sizeof(co2::detail::AwaiterOf<FsStat&>) == sizeof(void*), "");
+static_assert(std::is_same<co2::detail::AwaiterOf<FsStat>, FsStat>::value,
+              "an rvalue ReqAwaiter is still moved into the await slot");
 
 // 一个不可取消的请求（uv_queue_work 的 after 回调签名不同）。
 struct Work : uvco::detail::ReqAwaiter<Work, uv_work_t, int> {
@@ -96,6 +103,27 @@ auto statFrameLocal(uvco::Loop& loop, std::string path, std::string missing)
     op.path = missing;
     CO2_AWAIT_SET(second, op);
     CHECK(not second && second.error() == uvco::Errc::no_such_file);
+    CO2_RETURN(op.starts);
+}
+CO2_END
+
+
+auto statFrameLocalIdentity(uvco::Loop& loop, std::string path)
+    CO2_BEG(co2::Task<int>, (loop, path), FsStat op{loop, path}; void* frameAddr = nullptr;
+            uvco::Result<uv_stat_t> first; std::size_t allocations = 0;) {
+    frameAddr = &op;
+#ifdef UVCO_TEST_WRAP_NEW
+    allocation_test::begin();
+#endif
+    CO2_AWAIT_SET(first, op);
+#ifdef UVCO_TEST_WRAP_NEW
+    allocations = allocation_test::end();
+    CHECK(allocations == 0);
+#else
+    static_cast<void>(allocations);
+#endif
+    CHECK(first);
+    CHECK(op.startedAt == frameAddr);
     CO2_RETURN(op.starts);
 }
 CO2_END
@@ -151,6 +179,12 @@ TEST_CASE("ReqAwaiter: error is returned as Result") {
 TEST_CASE("ReqAwaiter: frame-local awaiter is reusable") {
     uvco::Loop loop;
     CHECK(uvco::run(loop, statFrameLocal(loop, UVCO_TEST_SOURCE_FILE, "/no/such/uvco")) == 2);
+}
+
+
+TEST_CASE("ReqAwaiter: lvalue await uses the frame-local object and does not allocate") {
+    uvco::Loop loop;
+    CHECK(uvco::run(loop, statFrameLocalIdentity(loop, UVCO_TEST_SOURCE_FILE)) == 1);
 }
 
 TEST_CASE("ReqAwaiter: stop requested before await completes with ECANCELED, no start") {

@@ -37,7 +37,8 @@
 //   1. 右值：CO2_AWAIT_SET(r, uvco::fs::stat(loop, path));  uv_fs_t 约 440 字节，超出 co2 的
 //      8 指针内联槽，awaiter 退化为一次堆分配；
 //   2. 帧局部（零分配）：把 fs::StatOp op{loop, path}; 写进 CO2_BEG 的局部列表，以左值
-//      CO2_AWAIT_SET(r, op); 等待。可重复等待；两次等待之间可经 op.args() 修改参数。
+//      CO2_AWAIT_SET(r, op); 等待。co2 对左值就地使用该对象，帧里只记地址。可重复等待；
+//      两次等待之间可经 op.args() 修改参数。
 //
 // File：只可移动的 fd 所有者。析构时若仍打开则**同步**关闭（uv_fs_close 无回调，阻塞调用
 // 线程一次 close(2)）；需要异步关闭或想知道 close 的错误时 CO2_AWAIT(file.close())。
