@@ -129,7 +129,7 @@ class KcpEndpointBlock final : public HandleBlock {
         return s;
     }
     void start() {
-        rxTask_ = receivePump(this);
+        rxTask_ = receivePump();
         rxActive_ = true;
         co2compat::TaskAccess::start(rxTask_, rxCompletion_.handle(), stop_.get_token());
     }
@@ -217,8 +217,8 @@ class KcpEndpointBlock final : public HandleBlock {
     }
 
   private:
-    static auto receivePump(KcpEndpointBlock *self)
-        CO2_BEG(co2::Task<>,(self),Result<Datagram> packet{Errc::canceled};) {
+    auto receivePump()
+        CO2_BEG_MEMBER(co2::Task<>,(),Result<Datagram> packet{Errc::canceled};) {
         while (!self->stopping_) {
             CO2_AWAIT_SET(packet, self->udp_.recv(buffer(self->receiveBuffer_)));
             if (!packet) {
@@ -232,8 +232,8 @@ class KcpEndpointBlock final : public HandleBlock {
         CO2_RETURN();
     }
     CO2_END
-    static auto transmitPump(KcpEndpointBlock *self)
-        CO2_BEG(co2::Task<>,(self),Packet* packet=nullptr;Result<void> result;) {
+    auto transmitPump()
+        CO2_BEG_MEMBER(co2::Task<>,(),Packet* packet=nullptr;Result<void> result;) {
         while ((packet = self->nextPacket()) != nullptr) {
             self->activePacket_ = packet;
             CO2_AWAIT_SET(result,
@@ -847,7 +847,7 @@ inline void KcpEndpointBlock::kickTx() noexcept {
     if (!any)
         return;
     try {
-        txTask_ = transmitPump(this);
+        txTask_ = transmitPump();
         txActive_ = true;
         co2compat::TaskAccess::start(txTask_, txCompletion_.handle(), {});
     } catch (std::bad_alloc const &) {
