@@ -20,7 +20,7 @@ include(cmake/uvcoDependencies.cmake)
 set(UVCO_CO2_GIT_REPOSITORY "https://github.com/lvyues1994/coro.git"
     CACHE STRING "co2 git repository used when find_package(co2) fails")
 # 固定到已验证的提交，保证 FetchContent 回退可复现。
-set(UVCO_CO2_GIT_TAG "a265e5771b0e3ca68d6d473b9bb410fadddf4c23"
+set(UVCO_CO2_GIT_TAG "0be5ab2f1b72be3755d8d13fb02d4bf32f652539"
     CACHE STRING "co2 git tag/commit used when find_package(co2) fails")
 set(UVCO_LIBUV_GIT_TAG "v1.48.0"
     CACHE STRING "libuv git tag used when no system libuv is found")

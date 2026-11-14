@@ -16,8 +16,9 @@
 - 本机Release五轮配对测量：128B echo p50增加3.80–4.82%；64KiB echo p50增加1.49–2.35%。
   这是单机loopback的具体数值，不是所有负载固定损耗；p99噪声大，不能宣称协程改善尾延迟。
 
-以下仓内路径均相对于`include/uvco/`；第三方 co2 固定为 CMakeLists.txt:23 的
-`a265e5771b0e3ca68d6d473b9bb410fadddf4c23`。
+以下仓内路径均相对于`include/uvco/`。§1–5 审计时第三方 co2 为
+`a265e5771b0e3ca68d6d473b9bb410fadddf4c23`；当前 FetchContent 锁定为
+`0be5ab2f1b72be3755d8d13fb02d4bf32f652539`（`UVCO_CO2_GIT_TAG`），默认 await 槽仍为 64B。
 
 ## 2. 每条数据路径的复制/所有权
 

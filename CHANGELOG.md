@@ -16,6 +16,7 @@
 - MIT LICENSE；Result create 工厂与统一格式规则。
 
 ### Changed
+- FetchContent 锁定的 co2 升级到 `0be5ab2f1b72be3755d8d13fb02d4bf32f652539`（仍为 0.3.0-pre）；公开 API 与热路径 64B 槽不变。
 - WriteAwaiter 热路径保持 co2 默认64B槽内联，pending native Req 才拥有 CancelHook；try_write 成功的右值 await 不再装箱分配。
 - BufferedReader 与 process capture 直接读入带异常/取消回滚的 string 尾部；已提交字节、输出 cap、EOF 与 reap 契约不变。
 - Work 构造不创建取消状态：无 token callable 不分配内部停止状态，合作式 callable 每次真正提交创建新状态；晚到取消规则不变。

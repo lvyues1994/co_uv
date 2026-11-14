@@ -502,7 +502,7 @@ openDir 的投影异常/迟到取消同步 closedir；readDir 只消耗游标，
 - **Loop 所有权**：用户持有 `Loop`；`run(loop, task)` 只负责驱动，同一 loop 可承载多个 Task。
 - **依赖引入**：libuv 与 co2 均优先 `find_package`（libuv 还会尝试 pkg-config），找不到时回退到
   FetchContent。co2 的预览版包不接受数值版本号，因此 `find_package(co2 CONFIG)` 不带版本；
-  FetchContent 固定到一个提交（`UVCO_CO2_GIT_TAG`）。
+  FetchContent 固定到一个提交（`UVCO_CO2_GIT_TAG`，当前为 `0be5ab2f1b72be3755d8d13fb02d4bf32f652539`）。
 - **契约而非异常**：`Result::value()` / `error()` 用错状态、在非 loop 线程调用 libuv 相关接口、
   带着挂起请求析构 awaiter、带着存活的 `KeepAlive` 析构 Loop、在 Loop 析构后使用孤儿句柄——
   都是契约违规（走 co2 的契约处理器），不抛异常。（带着打开的句柄析构 Loop 已不再违规，见 §4.1。）
