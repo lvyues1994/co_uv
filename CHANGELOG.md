@@ -5,6 +5,7 @@
 尚未发布。公开 API 在 0.1.0 发布前仍可能调整。
 
 ### Added
+- 架构、模块设计、时序图与使用手册（见 [docs/README.md](docs/README.md)），以及可编译的 `examples/`（`UVCO_BUILD_EXAMPLES` 默认随测试打开，并注册为 ctest）。
 - 实验 KCP 可选 target（默认 OFF）：固定原样 vendor、纯核、消息/stream、共享 UDP endpoint 与有界显式 accept。
 - C++14/co2 + libuv 的 Result、Loop、请求/句柄生命周期与取消基础层。
 - Timer/sleep、Event/Mutex/Channel、whenAny/whenAllResults/timeout、yieldNextTurn。

@@ -4,11 +4,15 @@
 
 
 基于 [co2](https://github.com/lvyues1994/coro)（C++14 无栈协程库）对 libuv 的协程封装。
-设计见 [docs/architecture.md](docs/architecture.md)。
+
+完整文档见 [docs/README.md](docs/README.md)：[架构设计](docs/architecture.md)、
+[模块设计](docs/modules/README.md)、[时序图](docs/sequences.md)、[使用手册](docs/guide.md)。
+可编译示例在 [`examples/`](examples/)，默认随测试目标构建（`UVCO_BUILD_EXAMPLES`）。
 
 提供 Loop/Result、timer、sync/组合器、Tcp/Pipe/TTY、UDP、文件/目录与 fs watchers、
-Signal/phase hooks、Process/capture、DNS resolver/cache、Happy Eyeballs 核心子集及线程池 Work。
-库为 header-only，错误边界、取消与关闭规则见下文及架构文档。
+Signal/phase hooks、Process/capture、DNS resolver/cache、Happy Eyeballs 核心子集、
+线程池 Work，以及可选的 KCP 适配（`UVCO_ENABLE_KCP`）。
+库为 header-only，错误边界、取消与关闭规则见使用手册与架构文档。
 
 ## 要求
 
@@ -23,6 +27,9 @@ Signal/phase hooks、Process/capture、DNS resolver/cache、Happy Eyeballs 核�
 cmake --preset debug-gcc   && cmake --build --preset debug-gcc   && ctest --preset debug-gcc
 cmake --preset debug-clang && cmake --build --preset debug-clang && ctest --preset debug-clang
 ```
+
+手册中的示例注册为 `uvco-example-*` 测试。打开 KCP（`UVCO_ENABLE_KCP=ON`）时还会构建 `uvco-example-10-kcp`。
+完整命令、sanitizer 组合与安装方式见 [使用手册](docs/guide.md)。
 
 ## 在其他项目中使用
 
